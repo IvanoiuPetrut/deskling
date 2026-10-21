@@ -1,0 +1,13 @@
+[package]
+name = "gpui-hello"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+env_logger = "0.11.11"
+gpui-kit = "0.8.0"
+
+# The D3D11 debug layer on this machine is mismatched (0x887A002D), and GPUI
+# requests it whenever debug assertions are on. Disable them for that crate only.
+[profile.dev.package.gpui-pre-windows]
+debug-assertions = false
