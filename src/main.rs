@@ -6,7 +6,7 @@ struct HelloWorld {
 }
 
 impl Render for HelloWorld {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -19,13 +19,13 @@ impl Render for HelloWorld {
                 Button::new("hello")
                     .primary()
                     .label("Click me")
-                    .on_click(|event, window, _| {
+                    .on_click(cx.listener(|this, event, window, cx| {
                         println!("Clicked! {:?} \n {:?}", event, window.mouse_position());
-                        count += 1;
+                        this.count += 1;
                         cx.notify();
-                    }),
+                    })),
             )
-            .child("Count: {count}")
+            .child(format!("Count: {}", self.count))
     }
 }
 
