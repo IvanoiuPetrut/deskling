@@ -6,6 +6,17 @@ edition = "2024"
 [dependencies]
 env_logger = "0.11.11"
 gpui-kit = "0.8.0"
+raw-window-handle = "0.6.2"
+
+# Win32 calls used to keep the desktop widget on the desktop layer (also through Win+D).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # The D3D11 debug layer on this machine is mismatched (0x887A002D), and GPUI
 # requests it whenever debug assertions are on. Disable them for that crate only.

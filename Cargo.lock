@@ -2257,6 +2257,8 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "gpui-kit",
+ "raw-window-handle",
+ "windows 0.62.2",
 ]
 
 [[package]]
