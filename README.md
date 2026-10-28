@@ -35,8 +35,9 @@ To stop the app, close the main window, or press `Ctrl+C` in the terminal.
 ```
 Cargo.toml      dependencies and build settings (like package.json)
 src/
-├── main.rs     entry point: main panel with the counter and the widget toggle
-└── widget.rs   the desktop widget window and the Windows code that pins it to the desktop
+├── main.rs             entry point: main panel with the counter, the widget toggle and the style panel
+├── widget.rs           the desktop widget, its WidgetStyle, and the Windows code that pins it to the desktop
+└── widget_settings.rs  the "Widget style" panel: sliders, border type and color pickers
 ```
 
 ## The desktop widget
@@ -47,6 +48,9 @@ Click **Show widget** in the main panel to open it, and **Hide widget** to close
 - It stays below all normal windows, directly above the desktop wallpaper.
 - It stays visible after Win+D (show desktop).
 - Drag it anywhere to move it.
+- The **Widget style** panel in the main window changes it live: size, padding, corner radius,
+  font size, background opacity, border (none / solid / dashed) and width, and the text,
+  background and border colors.
 
 It has no close button of its own. If you close the main panel while the widget is open and the
 app keeps running, stop it with `Ctrl+C` in the terminal.

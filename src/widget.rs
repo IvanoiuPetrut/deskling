@@ -1,26 +1,89 @@
 use gpui_kit::*;
 
-struct ClockWidget;
+#[derive(Clone, Copy, PartialEq)]
+pub enum BorderKind {
+    None,
+    Solid,
+    Dashed,
+}
+
+impl BorderKind {
+    pub const ALL: [BorderKind; 3] = [BorderKind::None, BorderKind::Solid, BorderKind::Dashed];
+}
+
+/// Everything about how the widget looks. The main panel edits it, the widget redraws from it.
+#[derive(Clone)]
+pub struct WidgetStyle {
+    pub width: f32,
+    pub height: f32,
+    pub padding: f32,
+    pub corner_radius: f32,
+    pub font_size: f32,
+    pub text_color: Hsla,
+    pub background: Hsla,
+    /// 0.0 = fully see-through, 1.0 = solid. Applied to `background` only.
+    pub opacity: f32,
+    pub border: BorderKind,
+    pub border_width: f32,
+    pub border_color: Hsla,
+}
+
+impl Default for WidgetStyle {
+    fn default() -> Self {
+        Self {
+            width: 200.,
+            height: 100.,
+            padding: 8.,
+            corner_radius: 12.,
+            font_size: 24.,
+            text_color: white(),
+            background: black(),
+            opacity: 0.6,
+            border: BorderKind::None,
+            border_width: 1.,
+            border_color: white().opacity(0.3),
+        }
+    }
+}
+
+struct ClockWidget {
+    style: Entity<WidgetStyle>,
+}
 
 impl Render for ClockWidget {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let style = self.style.read(cx);
+
+        let mut clock = div()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
-            .rounded_xl()
-            .bg(rgba(0x00000099))
-            .text_color(rgb(0xffffff))
-            .text_2xl()
+            .p(px(style.padding))
+            .rounded(px(style.corner_radius))
+            .bg(Hsla { a: style.opacity, ..style.background })
+            .text_color(style.text_color)
+            .text_size(px(style.font_size))
             .window_control_area(WindowControlArea::Drag)
-            .child("12:34")
+            .child("12:34");
+
+        if style.border != BorderKind::None {
+            clock = clock.border(px(style.border_width)).border_color(style.border_color);
+        }
+        if style.border == BorderKind::Dashed {
+            clock = clock.border_dashed();
+        }
+        clock
     }
 }
 
 /// Opens the widget window and returns its handle, so it can be closed later.
-pub fn open(cx: &mut App) -> AnyWindowHandle {
-    let bounds = Bounds::new(point(px(100.), px(100.)), size(px(200.), px(100.)));
+pub fn open(style: Entity<WidgetStyle>, cx: &mut App) -> AnyWindowHandle {
+    let current = style.read(cx);
+    let bounds = Bounds::new(
+        point(px(100.), px(100.)),
+        size(px(current.width), px(current.height)),
+    );
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
@@ -36,7 +99,19 @@ pub fn open(cx: &mut App) -> AnyWindowHandle {
         .open_window(options, |window, cx| {
             #[cfg(windows)]
             win32::pin_to_desktop(window);
-            cx.new(|_| ClockWidget)
+            cx.new(|cx| {
+                // Whenever the style changes: resize the window if needed, then redraw.
+                cx.observe_in(&style, window, |_, style, window, cx| {
+                    let style = style.read(cx);
+                    let wanted = size(px(style.width), px(style.height));
+                    if window.viewport_size() != wanted {
+                        window.resize(wanted);
+                    }
+                    cx.notify();
+                })
+                .detach();
+                ClockWidget { style }
+            })
         })
         .expect("Failed to open widget");
     handle.into()
@@ -52,14 +127,18 @@ mod win32 {
     use gpui_kit::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::Graphics::Dwm::{DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DwmSetWindowAttribute};
+    use windows::Win32::Graphics::Dwm::{
+        DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED, DWMWA_BORDER_COLOR,
+        DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
+        DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+    };
     use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
         EVENT_SYSTEM_FOREGROUND, FindWindowW, GW_HWNDPREV, GWL_EXSTYLE, GetWindow, GetWindowLongW,
-        HWND_BOTTOM, HWND_TOP, KillTimer, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetTimer,
-        SetWindowPos, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_NCDESTROY, WM_TIMER, WM_WINDOWPOSCHANGED,
-        WM_WINDOWPOSCHANGING, WS_EX_TOPMOST,
+        HWND_BOTTOM, HWND_TOP, KillTimer, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetTimer, SetWindowPos, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_NCCALCSIZE,
+        WM_NCDESTROY, WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WS_EX_TOPMOST,
     };
     use windows::core::{PCWSTR, w};
 
@@ -92,8 +171,40 @@ mod win32 {
                 size_of::<u32>() as u32,
             );
 
+            // Windows 11 also rounds window corners on its own; turn that off so the
+            // widget's own corner radius (even 0) decides the shape.
+            let no_rounding = DWMWCP_DONOTROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &no_rounding as *const DWM_WINDOW_CORNER_PREFERENCE as *const _,
+                size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+            );
+
+            // No window frame drawing at all: this removes the drop shadow (which outlines the
+            // window's square, not the rounded widget) and the accent-colored line on top.
+            let no_frame = DWMNCRP_DISABLED;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_NCRENDERING_POLICY,
+                &no_frame as *const DWMNCRENDERINGPOLICY as *const _,
+                size_of::<DWMNCRENDERINGPOLICY>() as u32,
+            );
+
             // Windows asks before every move/raise; this hook answers "stay above the desktop".
+            // It also answers WM_NCCALCSIZE with "the whole window is content, no frame".
             let _ = SetWindowSubclass(hwnd, Some(keep_above_desktop), SUBCLASS_ID, 0);
+
+            // Make Windows ask WM_NCCALCSIZE again now that the hook is in place.
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
 
             // Win+D changes the foreground window to the desktop, so re-place the widget then.
             let hook = SetWinEventHook(
@@ -177,6 +288,9 @@ mod win32 {
         _data: usize,
     ) -> LRESULT {
         match msg {
+            // "The client area is the whole window": no frame left for Windows to draw.
+            // Returned before GPUI sees it, because GPUI keeps the side and bottom frame.
+            WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),
             WM_WINDOWPOSCHANGING => {
                 let pos = unsafe { &mut *(lparam.0 as *mut WINDOWPOS) };
                 match slot_above_desktop(hwnd) {
