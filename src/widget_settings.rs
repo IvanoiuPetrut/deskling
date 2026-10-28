@@ -1,4 +1,3 @@
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
@@ -14,16 +13,15 @@ struct NumberSetting {
     get: fn(&WidgetStyle) -> f32,
 }
 
-/// The "Widget style" panel in the main window. Every change is written straight into the
-/// shared `WidgetStyle`, and the widget redraws itself from it.
+/// The style editor in the dashboard (sliders, border type, colors) for one `WidgetStyle`:
+/// the shared style or one widget's own. Every change is written straight into it, and the
+/// widgets using it redraw themselves.
 pub struct WidgetSettings {
     style: Entity<WidgetStyle>,
     numbers: Vec<NumberSetting>,
     text_color: Entity<ColorPickerState>,
     background: Entity<ColorPickerState>,
     border_color: Entity<ColorPickerState>,
-    /// Result of the last "Save settings" click, shown next to the button.
-    save_status: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -48,7 +46,7 @@ impl WidgetSettings {
         let background = Self::color(&style, current.background, |s, c| s.background = c, &mut subs, window, cx);
         let border_color = Self::color(&style, current.border_color, |s, c| s.border_color = c, &mut subs, window, cx);
 
-        Self { style, numbers, text_color, background, border_color, save_status: None, _subscriptions: subs }
+        Self { style, numbers, text_color, background, border_color, _subscriptions: subs }
     }
 
     /// Makes a slider that edits one number in the style.
@@ -115,26 +113,6 @@ impl Render for WidgetSettings {
             .flex_col()
             .gap_4()
             .w_full()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_lg().child("Widget style"))
-                    .child(
-                        Button::new("save-style")
-                            .primary()
-                            .label("Save settings")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.save_status = Some(match this.style.read(cx).save() {
-                                    Ok(path) => format!("Saved to {}", path.display()).into(),
-                                    Err(error) => format!("Could not save: {error}").into(),
-                                });
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .children(self.save_status.clone().map(|status| div().text_sm().child(status)))
             .children(self.numbers.iter().map(|number| {
                 div()
                     .flex()

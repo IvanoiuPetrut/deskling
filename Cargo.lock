@@ -2255,6 +2255,7 @@ dependencies = [
 name = "gpui-hello"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "env_logger",
  "gpui-kit",
  "image",
@@ -2262,6 +2263,7 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
+ "sysinfo",
  "windows 0.62.2",
 ]
 

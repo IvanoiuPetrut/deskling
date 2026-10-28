@@ -1,11 +1,14 @@
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
+use crate::dashboard::{WidgetConfig, WidgetKind};
 use crate::glass::{self, ScreenRect};
+use crate::stats::SystemStats;
 
 /// How often the desktop picture behind the glass is retaken, to catch wallpaper/icon changes.
 const GLASS_REFRESH: Duration = Duration::from_secs(10);
@@ -61,60 +64,67 @@ impl Default for WidgetStyle {
     }
 }
 
-impl WidgetStyle {
-    /// `%APPDATA%\gpui-hello\widget-style.json` on Windows (`~/.config/...` elsewhere).
-    fn file_path() -> Option<PathBuf> {
-        let base = std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-        Some(base.join("gpui-hello").join("widget-style.json"))
-    }
-
-    /// The saved style, or the default one if nothing was saved yet (or the file is broken).
-    pub fn load() -> Self {
-        let Some(path) = Self::file_path() else { return Self::default() };
-        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
-        serde_json::from_str(&text).unwrap_or_else(|error| {
-            log::warn!("Ignoring {}: {error}", path.display());
-            Self::default()
-        })
-    }
-
-    /// Writes the style to disk and returns where it went.
-    pub fn save(&self) -> std::io::Result<PathBuf> {
-        let path = Self::file_path().ok_or(std::io::ErrorKind::NotFound)?;
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
-        Ok(path)
-    }
+thread_local! {
+    /// One desktop picture shared by all widgets (it's ~50 MB on big screens).
+    static DESKTOP: RefCell<Option<(Instant, Weak<glass::Snapshot>)>> = const { RefCell::new(None) };
 }
 
-struct ClockWidget {
-    style: Entity<WidgetStyle>,
+/// The shared desktop picture. Retaken when it's getting old or no widget holds it any more.
+fn desktop_snapshot() -> Option<Rc<glass::Snapshot>> {
+    DESKTOP.with_borrow_mut(|cached| {
+        if let Some((taken, weak)) = cached
+            && taken.elapsed() < GLASS_REFRESH / 2
+            && let Some(snapshot) = weak.upgrade()
+        {
+            return Some(snapshot);
+        }
+        let snapshot = Rc::new(win32::capture_desktop()?);
+        *cached = Some((Instant::now(), Rc::downgrade(&snapshot)));
+        Some(snapshot)
+    })
+}
+
+/// 1 GB as Windows Explorer counts it (1024 x 1024 x 1024 bytes).
+pub fn gigabytes(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / (1024. * 1024. * 1024.))
+}
+
+/// One widget window on the desktop: a clock, CPU, RAM or disk, depending on its config.
+struct DesktopWidget {
+    config: Entity<WidgetConfig>,
+    shared_style: Entity<WidgetStyle>,
+    stats: Entity<SystemStats>,
     /// Picture of the desktop, kept so moving the widget only needs a new crop + blur.
-    desktop: Option<glass::Snapshot>,
+    desktop: Option<Rc<glass::Snapshot>>,
     /// The blurred background currently shown, if the glass effect is on.
     glass: Option<Arc<RenderImage>>,
     _subscriptions: Vec<Subscription>,
     _refresh: Task<()>,
 }
 
-impl ClockWidget {
-    fn new(style: Entity<WidgetStyle>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+impl DesktopWidget {
+    fn new(
+        config: Entity<WidgetConfig>,
+        shared_style: Entity<WidgetStyle>,
+        stats: Entity<SystemStats>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let own_style = config.read(cx).style.clone();
         let subscriptions = vec![
-            // Whenever the style changes: resize the window if needed, then redraw.
-            cx.observe_in(&style, window, |this, style, window, cx| {
-                let style = style.read(cx);
-                let wanted = size(px(style.width), px(style.height));
-                if window.viewport_size() != wanted {
-                    window.resize(wanted);
-                }
+            // Any setting or either style changed: resize if needed and redraw.
+            cx.observe_in(&config, window, |this, _, window, cx| this.restyle(window, cx)),
+            cx.observe_in(&own_style, window, |this, _, window, cx| this.restyle(window, cx)),
+            cx.observe_in(&shared_style, window, |this, _, window, cx| this.restyle(window, cx)),
+            // New numbers every second (this also keeps the clock ticking).
+            cx.observe(&stats, |_, _, cx| cx.notify()),
+            // Dragged or resized: remember where, and what's behind it changed.
+            cx.observe_window_bounds(window, |this, window, cx| {
+                let origin = window.bounds().origin;
+                // No `cx.notify()` in here: the position needs saving, not redrawing.
+                this.config.update(cx, |config, _| config.position = origin);
                 this.update_glass(window, cx);
             }),
-            // Dragged or resized: what's behind it changed.
-            cx.observe_window_bounds(window, |this, window, cx| this.update_glass(window, cx)),
         ];
 
         let refresh = cx.spawn_in(window, async move |this, cx| {
@@ -131,7 +141,9 @@ impl ClockWidget {
         });
 
         let mut this = Self {
-            style,
+            config,
+            shared_style,
+            stats,
             desktop: None,
             glass: None,
             _subscriptions: subscriptions,
@@ -141,14 +153,29 @@ impl ClockWidget {
         this
     }
 
+    /// The style in use: the dashboard's shared one, or this widget's own.
+    fn style<'a>(&self, cx: &'a App) -> &'a WidgetStyle {
+        let config = self.config.read(cx);
+        if config.use_shared_style { self.shared_style.read(cx) } else { config.style.read(cx) }
+    }
+
+    fn restyle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let style = self.style(cx);
+        let wanted = size(px(style.width), px(style.height));
+        if window.viewport_size() != wanted {
+            window.resize(wanted);
+        }
+        self.update_glass(window, cx);
+    }
+
     /// Rebuilds the blurred background for the widget's current position, size and style.
     fn update_glass(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let style = self.style.read(cx);
+        let style = self.style(cx);
         let (blur, border, border_width) = (style.blur, style.border, style.border_width);
 
         let new_glass = if blur > 0. {
             if self.desktop.is_none() {
-                self.desktop = win32::capture_desktop();
+                self.desktop = desktop_snapshot();
             }
             let scale = window.scale_factor();
             // With a solid border the glass only fills the inside, so skip the border strip.
@@ -163,7 +190,7 @@ impl ClockWidget {
                 glass::blurred_region(desktop, inside, (blur * scale).round() as u32)
             })
         } else {
-            self.desktop = None; // glass is off: don't keep the big picture around
+            self.desktop = None; // glass is off: let go of the big picture
             None
         };
 
@@ -173,11 +200,66 @@ impl ClockWidget {
         }
         cx.notify();
     }
+
+    /// What the widget shows: a small label, the big value, and an optional bar (0.0–1.0).
+    fn lines(&self, cx: &App) -> (String, String, Option<f32>) {
+        let config = self.config.read(cx);
+        let stats = self.stats.read(cx);
+        match config.kind {
+            WidgetKind::Clock => {
+                let now = chrono::Local::now();
+                (now.format("%a %d %b").to_string(), now.format("%H:%M").to_string(), None)
+            }
+            WidgetKind::Cpu => {
+                let label = match (config.show_temperature, stats.cpu_temperature) {
+                    (false, _) => "CPU".to_string(),
+                    (true, Some(celsius)) => format!("CPU · {celsius:.0} °C"),
+                    (true, None) => "CPU · temp n/a".to_string(),
+                };
+                (label, format!("{:.0}%", stats.cpu_usage), Some(stats.cpu_usage / 100.))
+            }
+            WidgetKind::Ram => {
+                let used = stats.ram_used as f32 / stats.ram_total.max(1) as f32;
+                (
+                    format!("RAM · {} / {}", gigabytes(stats.ram_used), gigabytes(stats.ram_total)),
+                    format!("{:.0}%", used * 100.),
+                    Some(used),
+                )
+            }
+            WidgetKind::Disk => match stats.disk(&config.disk).or(stats.disks.first()) {
+                Some(disk) => (
+                    format!("{} free of {}", disk.mount, gigabytes(disk.total)),
+                    gigabytes(disk.free),
+                    Some(1. - disk.free as f32 / disk.total.max(1) as f32),
+                ),
+                None => ("Disk".into(), "–".into(), None),
+            },
+        }
+    }
 }
 
-impl Render for ClockWidget {
+impl Render for DesktopWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let style = self.style.read(cx);
+        let (label, value, bar) = self.lines(cx);
+        let style = self.style(cx).clone();
+
+        let text = div()
+            .relative()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .child(div().text_size(px(style.font_size * 0.45)).opacity(0.8).child(label))
+            .child(div().child(value))
+            .children(bar.map(|fill| {
+                div()
+                    .w(relative(0.8))
+                    .h(px(4.))
+                    .rounded_full()
+                    .bg(style.text_color.opacity(0.2))
+                    .child(div().h_full().w(relative(fill.clamp(0., 1.))).rounded_full().bg(style.text_color))
+            }));
 
         // Layers, back to front: blurred desktop, tint (background color + opacity), text.
         let content = |radius: f32| {
@@ -206,7 +288,7 @@ impl Render for ClockWidget {
                         .rounded(px(radius))
                         .bg(Hsla { a: style.opacity, ..style.background }),
                 )
-                .child(div().relative().child("12:34"))
+                .child(text)
         };
 
         let frame = div()
@@ -233,19 +315,23 @@ impl Render for ClockWidget {
     }
 }
 
-/// Opens the widget window and returns its handle, so it can be closed later.
-pub fn open(style: Entity<WidgetStyle>, cx: &mut App) -> AnyWindowHandle {
-    let current = style.read(cx);
-    let bounds = Bounds::new(
-        point(px(100.), px(100.)),
-        size(px(current.width), px(current.height)),
-    );
+/// Opens one widget window and returns its handle, so it can be closed later.
+pub fn open(
+    config: Entity<WidgetConfig>,
+    shared_style: Entity<WidgetStyle>,
+    stats: Entity<SystemStats>,
+    cx: &mut App,
+) -> AnyWindowHandle {
+    let current = config.read(cx);
+    let style = if current.use_shared_style { shared_style.read(cx) } else { current.style.read(cx) };
+    let bounds = Bounds::new(current.position, size(px(style.width), px(style.height)));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
         kind: WindowKind::PopUp,
         window_background: WindowBackgroundAppearance::Transparent,
         is_resizable: false,
+        focus: false,
         ..Default::default()
     };
 
@@ -253,11 +339,16 @@ pub fn open(style: Entity<WidgetStyle>, cx: &mut App) -> AnyWindowHandle {
     // in its `Root`, which paints the theme background and would hide the transparency.
     let handle = cx
         .open_window(options, |window, cx| {
-            #[cfg(windows)]
-            win32::pin_to_desktop(window);
-            cx.new(|cx| ClockWidget::new(style, window, cx))
+            cx.new(|cx| DesktopWidget::new(config, shared_style, stats, window, cx))
         })
         .expect("Failed to open widget");
+    // The Win32 calls make Windows send the window messages right away. If GPUI is in the middle
+    // of something (creating or updating a window) it can't handle them and logs "RefCell already
+    // borrowed", so they run in a task, after GPUI is done with this window.
+    #[cfg(windows)]
+    if let Ok(Some(hwnd)) = handle.update(cx, |_, window, _| win32::raw_hwnd(window)) {
+        cx.spawn(async move |_| win32::pin_to_desktop(hwnd)).detach();
+    }
     handle.into()
 }
 
@@ -266,7 +357,8 @@ pub fn open(style: Entity<WidgetStyle>, cx: &mut App) -> AnyWindowHandle {
 /// also stays visible after Win+D (which raises the desktop over everything).
 #[cfg(windows)]
 mod win32 {
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
     use gpui_kit::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -302,11 +394,15 @@ mod win32 {
     const RECHECK_TICKS: u32 = 10;
     const RECHECK_INTERVAL_MS: u32 = 100;
 
-    // The foreground hook is a plain function with no `self`, so it finds the widget through these.
-    static WIDGET: AtomicIsize = AtomicIsize::new(0);
+    // The hooks are plain functions with no `self`, so they find the widgets through these.
+    // Each entry: (widget window, how many re-checks its timer has done).
+    static WIDGETS: Mutex<Vec<(isize, u32)>> = Mutex::new(Vec::new());
     static FOREGROUND_HOOK: AtomicIsize = AtomicIsize::new(0);
     static PLACING: AtomicBool = AtomicBool::new(false);
-    static RECHECKS_DONE: AtomicU32 = AtomicU32::new(0);
+
+    fn widget_windows() -> Vec<HWND> {
+        WIDGETS.lock().unwrap().iter().map(|(hwnd, _)| HWND(*hwnd as *mut _)).collect()
+    }
 
     fn hwnd_of(window: &Window) -> Option<HWND> {
         // GPUI's Window has its own `window_handle()`, so call the raw-window-handle one by name.
@@ -375,9 +471,14 @@ mod win32 {
         }
     }
 
-    pub fn pin_to_desktop(window: &Window) {
-        let Some(hwnd) = hwnd_of(window) else { return };
-        WIDGET.store(hwnd.0 as isize, Ordering::Relaxed);
+    /// The window's Win32 handle as a plain number, so it can be used outside a GPUI update.
+    pub fn raw_hwnd(window: &Window) -> Option<isize> {
+        hwnd_of(window).map(|hwnd| hwnd.0 as isize)
+    }
+
+    pub fn pin_to_desktop(raw_hwnd: isize) {
+        let hwnd = HWND(raw_hwnd as *mut _);
+        WIDGETS.lock().unwrap().push((raw_hwnd, 0));
 
         unsafe {
             // Windows 11 draws a thin border around every window; turn it off (no-op on Windows 10).
@@ -424,7 +525,12 @@ mod win32 {
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
 
-            // Win+D changes the foreground window to the desktop, so re-place the widget then.
+            // Win+D changes the foreground window to the desktop, so re-place the widgets then.
+            // One hook for all widgets: only the first widget installs it.
+            if FOREGROUND_HOOK.load(Ordering::Relaxed) != 0 {
+                place(hwnd);
+                return;
+            }
             let hook = SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
                 EVENT_SYSTEM_FOREGROUND,
@@ -441,15 +547,27 @@ mod win32 {
         place(hwnd);
     }
 
-    /// The `hwndInsertAfter` that puts `hwnd` directly above the desktop,
-    /// or `None` when it's already there.
+    /// The `hwndInsertAfter` that puts `hwnd` in the group of widgets directly above the
+    /// desktop, or `None` when it's already in that group.
     fn slot_above_desktop(hwnd: HWND) -> Option<HWND> {
         let Ok(desktop) = (unsafe { FindWindowW(w!("Progman"), PCWSTR::null()) }) else {
             return Some(HWND_BOTTOM);
         };
-        match unsafe { GetWindow(desktop, GW_HWNDPREV) } {
-            Ok(above) if above == hwnd => None,
-            Ok(above) if !is_topmost(above) => Some(above),
+        // Walk up from the desktop over the other widgets, so widgets don't keep pushing
+        // each other out of the spot right above the desktop.
+        let widgets = widget_windows();
+        let mut above = unsafe { GetWindow(desktop, GW_HWNDPREV) };
+        while let Ok(window) = above {
+            if window == hwnd {
+                return None;
+            }
+            if !widgets.contains(&window) {
+                break;
+            }
+            above = unsafe { GetWindow(window, GW_HWNDPREV) };
+        }
+        match above {
+            Ok(window) if !is_topmost(window) => Some(window),
             // Nothing normal above the desktop (e.g. after Win+D): go to the top of the normal windows.
             _ => Some(HWND_TOP),
         }
@@ -486,15 +604,13 @@ mod win32 {
         _thread: u32,
         _time: u32,
     ) {
-        let widget = HWND(WIDGET.load(Ordering::Relaxed) as *mut _);
-        if widget.is_invalid() {
-            return;
-        }
-        place(widget);
         // The event fires before the desktop actually moves (Win+D raising it, or dropping it
         // back on restore), so keep re-checking for a short moment afterwards.
-        RECHECKS_DONE.store(0, Ordering::Relaxed);
-        unsafe { SetTimer(Some(widget), RECHECK_TIMER_ID, RECHECK_INTERVAL_MS, None) };
+        WIDGETS.lock().unwrap().iter_mut().for_each(|(_, rechecks)| *rechecks = 0);
+        for widget in widget_windows() {
+            place(widget);
+            unsafe { SetTimer(Some(widget), RECHECK_TIMER_ID, RECHECK_INTERVAL_MS, None) };
+        }
     }
 
     unsafe extern "system" fn keep_above_desktop(
@@ -528,7 +644,15 @@ mod win32 {
             }
             WM_TIMER if wparam.0 == RECHECK_TIMER_ID => {
                 place(hwnd);
-                if RECHECKS_DONE.fetch_add(1, Ordering::Relaxed) + 1 >= RECHECK_TICKS {
+                let done = {
+                    let mut widgets = WIDGETS.lock().unwrap();
+                    let entry = widgets.iter_mut().find(|(widget, _)| *widget == hwnd.0 as isize);
+                    entry.map_or(RECHECK_TICKS, |(_, rechecks)| {
+                        *rechecks += 1;
+                        *rechecks
+                    })
+                };
+                if done >= RECHECK_TICKS {
                     let _ = unsafe { KillTimer(Some(hwnd), RECHECK_TIMER_ID) };
                 }
                 return LRESULT(0);
@@ -536,11 +660,18 @@ mod win32 {
             WM_NCDESTROY => unsafe {
                 let _ = KillTimer(Some(hwnd), RECHECK_TIMER_ID);
                 let _ = RemoveWindowSubclass(hwnd, Some(keep_above_desktop), SUBCLASS_ID);
-                let hook = FOREGROUND_HOOK.swap(0, Ordering::Relaxed);
-                if hook != 0 {
-                    let _ = UnhookWinEvent(HWINEVENTHOOK(hook as *mut _));
+                let none_left = {
+                    let mut widgets = WIDGETS.lock().unwrap();
+                    widgets.retain(|(widget, _)| *widget != hwnd.0 as isize);
+                    widgets.is_empty()
+                };
+                // Last widget gone: stop listening for foreground changes.
+                if none_left {
+                    let hook = FOREGROUND_HOOK.swap(0, Ordering::Relaxed);
+                    if hook != 0 {
+                        let _ = UnhookWinEvent(HWINEVENTHOOK(hook as *mut _));
+                    }
                 }
-                WIDGET.store(0, Ordering::Relaxed);
             },
             _ => {}
         }
