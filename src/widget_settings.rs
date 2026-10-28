@@ -37,6 +37,7 @@ impl WidgetSettings {
             Self::number(&style, "Font size", "px", (8., 96., 1.), |s| s.font_size, |s, v| s.font_size = v, &mut subs, cx),
             Self::number(&style, "Background opacity", "%", (0., 100., 1.), |s| s.opacity * 100., |s, v| s.opacity = v / 100., &mut subs, cx),
             Self::number(&style, "Border width", "px", (1., 12., 1.), |s| s.border_width, |s, v| s.border_width = v, &mut subs, cx),
+            Self::number(&style, "Glass blur", "px", (0., 40., 1.), |s| s.blur, |s, v| s.blur = v, &mut subs, cx),
         ];
 
         let current = style.read(cx).clone();

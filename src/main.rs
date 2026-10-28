@@ -1,6 +1,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 
+mod glass;
 mod widget;
 mod widget_settings;
 

@@ -1,4 +1,12 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use gpui_kit::*;
+
+use crate::glass::{self, ScreenRect};
+
+/// How often the desktop picture behind the glass is retaken, to catch wallpaper/icon changes.
+const GLASS_REFRESH: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum BorderKind {
@@ -26,6 +34,8 @@ pub struct WidgetStyle {
     pub border: BorderKind,
     pub border_width: f32,
     pub border_color: Hsla,
+    /// Blur of the desktop behind the widget, in pixels. 0 = no glass, plain see-through.
+    pub blur: f32,
 }
 
 impl Default for WidgetStyle {
@@ -42,30 +52,127 @@ impl Default for WidgetStyle {
             border: BorderKind::None,
             border_width: 1.,
             border_color: white().opacity(0.3),
+            blur: 0.,
         }
     }
 }
 
 struct ClockWidget {
     style: Entity<WidgetStyle>,
+    /// Picture of the desktop, kept so moving the widget only needs a new crop + blur.
+    desktop: Option<glass::Snapshot>,
+    /// The blurred background currently shown, if the glass effect is on.
+    glass: Option<Arc<RenderImage>>,
+    _subscriptions: Vec<Subscription>,
+    _refresh: Task<()>,
+}
+
+impl ClockWidget {
+    fn new(style: Entity<WidgetStyle>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let subscriptions = vec![
+            // Whenever the style changes: resize the window if needed, then redraw.
+            cx.observe_in(&style, window, |this, style, window, cx| {
+                let style = style.read(cx);
+                let wanted = size(px(style.width), px(style.height));
+                if window.viewport_size() != wanted {
+                    window.resize(wanted);
+                }
+                this.update_glass(window, cx);
+            }),
+            // Dragged or resized: what's behind it changed.
+            cx.observe_window_bounds(window, |this, window, cx| this.update_glass(window, cx)),
+        ];
+
+        let refresh = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(GLASS_REFRESH).await;
+                let updated = this.update_in(cx, |this, window, cx| {
+                    this.desktop = None;
+                    this.update_glass(window, cx);
+                });
+                if updated.is_err() {
+                    break; // the widget was closed
+                }
+            }
+        });
+
+        let mut this = Self {
+            style,
+            desktop: None,
+            glass: None,
+            _subscriptions: subscriptions,
+            _refresh: refresh,
+        };
+        this.update_glass(window, cx);
+        this
+    }
+
+    /// Rebuilds the blurred background for the widget's current position, size and style.
+    fn update_glass(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let style = self.style.read(cx);
+        let (blur, border, border_width) = (style.blur, style.border, style.border_width);
+
+        let new_glass = if blur > 0. {
+            if self.desktop.is_none() {
+                self.desktop = win32::capture_desktop();
+            }
+            let scale = window.scale_factor();
+            // With a solid border the glass only fills the inside, so skip the border strip.
+            let inset = if border == BorderKind::Solid { (border_width * scale).round() as i32 } else { 0 };
+            self.desktop.as_ref().zip(win32::window_screen_rect(window)).and_then(|(desktop, rect)| {
+                let inside = ScreenRect {
+                    x: rect.x + inset,
+                    y: rect.y + inset,
+                    width: rect.width - 2 * inset,
+                    height: rect.height - 2 * inset,
+                };
+                glass::blurred_region(desktop, inside, (blur * scale).round() as u32)
+            })
+        } else {
+            self.desktop = None; // glass is off: don't keep the big picture around
+            None
+        };
+
+        // Free the old image's GPU memory.
+        if let Some(old) = std::mem::replace(&mut self.glass, new_glass) {
+            window.drop_image(old).ok();
+        }
+        cx.notify();
+    }
 }
 
 impl Render for ClockWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let style = self.style.read(cx);
 
+        // Layers, back to front: blurred desktop, tint (background color + opacity), text.
         let content = |radius: f32| {
             div()
+                .relative()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .p(px(style.padding))
                 .rounded(px(radius))
-                .bg(Hsla { a: style.opacity, ..style.background })
                 .text_color(style.text_color)
                 .text_size(px(style.font_size))
-                .child("12:34")
+                .children(self.glass.clone().map(|glass| {
+                    img(glass)
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Fill)
+                        .rounded(px(radius))
+                }))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(radius))
+                        .bg(Hsla { a: style.opacity, ..style.background }),
+                )
+                .child(div().relative().child("12:34"))
         };
 
         let frame = div()
@@ -114,19 +221,7 @@ pub fn open(style: Entity<WidgetStyle>, cx: &mut App) -> AnyWindowHandle {
         .open_window(options, |window, cx| {
             #[cfg(windows)]
             win32::pin_to_desktop(window);
-            cx.new(|cx| {
-                // Whenever the style changes: resize the window if needed, then redraw.
-                cx.observe_in(&style, window, |_, style, window, cx| {
-                    let style = style.read(cx);
-                    let wanted = size(px(style.width), px(style.height));
-                    if window.viewport_size() != wanted {
-                        window.resize(wanted);
-                    }
-                    cx.notify();
-                })
-                .detach();
-                ClockWidget { style }
-            })
+            cx.new(|cx| ClockWidget::new(style, window, cx))
         })
         .expect("Failed to open widget");
     handle.into()
@@ -141,7 +236,14 @@ mod win32 {
 
     use gpui_kit::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+        DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
+    };
+    use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+
+    use crate::glass::{self, ScreenRect};
     use windows::Win32::Graphics::Dwm::{
         DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED, DWMWA_BORDER_COLOR,
         DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -151,6 +253,7 @@ mod win32 {
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
         EVENT_SYSTEM_FOREGROUND, FindWindowW, GW_HWNDPREV, GWL_EXSTYLE, GetWindow, GetWindowLongW,
+        GetWindowRect,
         HWND_BOTTOM, HWND_TOP, KillTimer, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         SWP_NOZORDER, SetTimer, SetWindowPos, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_NCCALCSIZE,
         WM_NCDESTROY, WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WS_EX_TOPMOST,
@@ -158,6 +261,8 @@ mod win32 {
     use windows::core::{PCWSTR, w};
 
     const SUBCLASS_ID: usize = 1;
+    // Not in the `windows` crate: makes PrintWindow return what's actually on screen (incl. DWM content).
+    const PW_RENDERFULLCONTENT: PRINT_WINDOW_FLAGS = PRINT_WINDOW_FLAGS(2);
     // Unusual id so it can't clash with GPUI's own timers on this window.
     const RECHECK_TIMER_ID: usize = 0x5EED;
     const RECHECK_TICKS: u32 = 10;
@@ -169,11 +274,75 @@ mod win32 {
     static PLACING: AtomicBool = AtomicBool::new(false);
     static RECHECKS_DONE: AtomicU32 = AtomicU32::new(0);
 
-    pub fn pin_to_desktop(window: &Window) {
+    fn hwnd_of(window: &Window) -> Option<HWND> {
         // GPUI's Window has its own `window_handle()`, so call the raw-window-handle one by name.
-        let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
-        let RawWindowHandle::Win32(win32) = handle.as_raw() else { return };
-        let hwnd = HWND(win32.hwnd.get() as *mut _);
+        let handle = HasWindowHandle::window_handle(window).ok()?;
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else { return None };
+        Some(HWND(win32.hwnd.get() as *mut _))
+    }
+
+    /// The window's position and size on screen, in physical pixels.
+    pub fn window_screen_rect(window: &Window) -> Option<ScreenRect> {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(hwnd_of(window)?, &mut rect) }.ok()?;
+        Some(ScreenRect {
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        })
+    }
+
+    /// Takes a picture of the desktop (wallpaper + icons) without any windows on it,
+    /// by asking the desktop window to draw itself into an off-screen bitmap.
+    pub fn capture_desktop() -> Option<glass::Snapshot> {
+        unsafe {
+            let desktop = FindWindowW(w!("Progman"), PCWSTR::null()).ok()?;
+            let mut rect = RECT::default();
+            GetWindowRect(desktop, &mut rect).ok()?;
+            let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+
+            let screen = GetDC(None);
+            let dc = CreateCompatibleDC(Some(screen));
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height, // negative = rows go top to bottom
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let snapshot = match CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+                Ok(bitmap) => {
+                    let previous = SelectObject(dc, bitmap.into());
+                    let drawn = PrintWindow(desktop, dc, PW_RENDERFULLCONTENT).as_bool();
+                    let snapshot = drawn.then(|| glass::Snapshot {
+                        left: rect.left,
+                        top: rect.top,
+                        width,
+                        height,
+                        bgra: std::slice::from_raw_parts(bits as *const u8, (width * height * 4) as usize)
+                            .to_vec(),
+                    });
+                    SelectObject(dc, previous);
+                    let _ = DeleteObject(bitmap.into());
+                    snapshot
+                }
+                Err(_) => None,
+            };
+            let _ = DeleteDC(dc);
+            ReleaseDC(None, screen);
+            snapshot
+        }
+    }
+
+    pub fn pin_to_desktop(window: &Window) {
+        let Some(hwnd) = hwnd_of(window) else { return };
         WIDGET.store(hwnd.0 as isize, Ordering::Relaxed);
 
         unsafe {
@@ -342,5 +511,21 @@ mod win32 {
             _ => {}
         }
         unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+    }
+}
+
+/// Other platforms: no desktop pinning and no glass (there's no desktop picture to blur).
+#[cfg(not(windows))]
+mod win32 {
+    use gpui_kit::Window;
+
+    use crate::glass::{Snapshot, ScreenRect};
+
+    pub fn capture_desktop() -> Option<Snapshot> {
+        None
+    }
+
+    pub fn window_screen_rect(_: &Window) -> Option<ScreenRect> {
+        None
     }
 }
