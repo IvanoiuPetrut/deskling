@@ -2258,7 +2258,10 @@ dependencies = [
  "env_logger",
  "gpui-kit",
  "image",
+ "log",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "windows 0.62.2",
 ]
 

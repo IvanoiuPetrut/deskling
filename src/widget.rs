@@ -1,14 +1,16 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::*;
+use serde::{Deserialize, Serialize};
 
 use crate::glass::{self, ScreenRect};
 
 /// How often the desktop picture behind the glass is retaken, to catch wallpaper/icon changes.
 const GLASS_REFRESH: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BorderKind {
     None,
     Solid,
@@ -20,7 +22,9 @@ impl BorderKind {
 }
 
 /// Everything about how the widget looks. The main panel edits it, the widget redraws from it.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+// Fields missing from an older saved file get their default value instead of failing to load.
+#[serde(default)]
 pub struct WidgetStyle {
     pub width: f32,
     pub height: f32,
@@ -54,6 +58,36 @@ impl Default for WidgetStyle {
             border_color: white().opacity(0.3),
             blur: 0.,
         }
+    }
+}
+
+impl WidgetStyle {
+    /// `%APPDATA%\gpui-hello\widget-style.json` on Windows (`~/.config/...` elsewhere).
+    fn file_path() -> Option<PathBuf> {
+        let base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+        Some(base.join("gpui-hello").join("widget-style.json"))
+    }
+
+    /// The saved style, or the default one if nothing was saved yet (or the file is broken).
+    pub fn load() -> Self {
+        let Some(path) = Self::file_path() else { return Self::default() };
+        let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
+        serde_json::from_str(&text).unwrap_or_else(|error| {
+            log::warn!("Ignoring {}: {error}", path.display());
+            Self::default()
+        })
+    }
+
+    /// Writes the style to disk and returns where it went.
+    pub fn save(&self) -> std::io::Result<PathBuf> {
+        let path = Self::file_path().ok_or(std::io::ErrorKind::NotFound)?;
+        if let Some(folder) = path.parent() {
+            std::fs::create_dir_all(folder)?;
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(path)
     }
 }
 

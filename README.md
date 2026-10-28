@@ -52,6 +52,8 @@ Click **Show widget** in the main panel to open it, and **Hide widget** to close
 - The **Widget style** panel in the main window changes it live: size, padding, corner radius,
   font size, background opacity, border (none / solid / dashed) and width, glass blur, and the
   text, background and border colors.
+- **Save settings** writes the current style to `%APPDATA%\gpui-hello\widget-style.json`, and
+  the app loads it on the next start. Delete that file to go back to the defaults.
 - **Glass blur** blurs the desktop behind the widget. Windows' own blur effects don't work on
   GPUI windows, so the app takes a picture of the desktop and blurs it itself. The picture is
   retaken every 10 seconds, so a wallpaper or icon change shows up with a short delay.

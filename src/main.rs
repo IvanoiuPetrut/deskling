@@ -18,7 +18,7 @@ struct HelloWorld {
 impl HelloWorld {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // One shared style: the settings panel writes to it, the widget reads from it.
-        let widget_style = cx.new(|_| WidgetStyle::default());
+        let widget_style = cx.new(|_| WidgetStyle::load());
         let widget_settings = cx.new(|cx| WidgetSettings::new(widget_style.clone(), window, cx));
 
         Self { count: 15, widget: None, widget_style, widget_settings }
