@@ -54,26 +54,41 @@ impl Render for ClockWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let style = self.style.read(cx);
 
-        let mut clock = div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(style.padding))
-            .rounded(px(style.corner_radius))
-            .bg(Hsla { a: style.opacity, ..style.background })
-            .text_color(style.text_color)
-            .text_size(px(style.font_size))
-            .window_control_area(WindowControlArea::Drag)
-            .child("12:34");
+        let content = |radius: f32| {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(style.padding))
+                .rounded(px(radius))
+                .bg(Hsla { a: style.opacity, ..style.background })
+                .text_color(style.text_color)
+                .text_size(px(style.font_size))
+                .child("12:34")
+        };
 
-        if style.border != BorderKind::None {
-            clock = clock.border(px(style.border_width)).border_color(style.border_color);
+        let frame = div()
+            .size_full()
+            .rounded(px(style.corner_radius))
+            .window_control_area(WindowControlArea::Drag);
+
+        match style.border {
+            BorderKind::None => frame.child(content(style.corner_radius)),
+            // Drawn as two filled shapes (border color behind, fill on top) instead of GPUI's
+            // `.border()`: on a transparent window that leaves dark pixels on the outer edge.
+            BorderKind::Solid => frame
+                .bg(style.border_color)
+                .p(px(style.border_width))
+                .child(content((style.corner_radius - style.border_width).max(0.))),
+            // Dashes need GPUI's own border drawing, so this one keeps `.border()`.
+            BorderKind::Dashed => frame.child(
+                content(style.corner_radius)
+                    .border(px(style.border_width))
+                    .border_color(style.border_color)
+                    .border_dashed(),
+            ),
         }
-        if style.border == BorderKind::Dashed {
-            clock = clock.border_dashed();
-        }
-        clock
     }
 }
 
