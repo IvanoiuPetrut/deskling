@@ -66,7 +66,7 @@ adds a new one (several of the same type are fine, e.g. two Disk widgets for C: 
 
 | Widget | Shows | Options |
 |---|---|---|
-| Clock | time and date | |
+| Clock | time and date | 12/24-hour, seconds, date format, another time zone (UTC offset) |
 | CPU | usage in %, and the temperature | show temperature, history graph |
 | RAM | used / total and % | history graph |
 | Disk space | free space on one drive | which drive |
@@ -74,9 +74,21 @@ adds a new one (several of the same type are fine, e.g. two Disk widgets for C: 
 
 The **history graph** replaces the usage bar with a small chart of the last minute.
 
+Every widget also has:
+
+- **Label**: your own text instead of the automatic one (e.g. "Tokyo" for a world clock).
+- **Show label / value / bar**: hide the parts you don't want.
+- **Lock position**: the widget can't be dragged.
+- **Color by usage** (CPU, RAM, disk): above the warning or critical % the value, bar and graph
+  switch to the style's Warning / Critical colors. For disks it's the used space.
+
+The **Layout** page has **Snap to grid** (widgets move in grid steps while you drag them, grid size
+5–100 px) and **Lock all / Unlock all**.
+
 Each widget either uses the **Shared style** (default) or, with **Use shared style** turned off,
-its own style. A style covers size, padding, corner radius, font size, background opacity,
-border (none / solid / dashed) and width, glass blur, and the text, background and border colors.
+its own style. A style covers size, padding, corner radius, font (any installed font, weight,
+size, and the label's size), background opacity, border (none / solid / dashed) and width, glass
+blur, and the colors: text, background, border, bars & graphs, warning and critical.
 
 **Start with Windows** (in the dashboard header) adds the app to your sign-in programs (the
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key), started with `--hidden`.

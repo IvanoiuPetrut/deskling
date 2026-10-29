@@ -27,6 +27,83 @@ impl WidgetKind {
     }
 }
 
+/// Which parts of a widget are drawn, and an optional custom label.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Parts {
+    /// Replaces the automatic label (e.g. "CPU · 52 °C") when not empty.
+    pub label: String,
+    pub show_label: bool,
+    pub show_value: bool,
+    /// The usage bar, or the history graph when that's on.
+    pub show_bar: bool,
+}
+
+impl Default for Parts {
+    fn default() -> Self {
+        Self { label: String::new(), show_label: true, show_value: true, show_bar: true }
+    }
+}
+
+/// Recolors the value, bar and graph when usage (in %) gets high.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Thresholds {
+    pub enabled: bool,
+    pub warning: f32,
+    pub critical: f32,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self { enabled: false, warning: 70., critical: 90. }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum DateFormat {
+    /// Thu 29 Oct
+    #[default]
+    Short,
+    /// 29.10.2026
+    Numeric,
+    /// 2026-10-29
+    Iso,
+    /// Thursday, 29 October
+    Long,
+}
+
+impl DateFormat {
+    pub const ALL: [DateFormat; 4] = [DateFormat::Short, DateFormat::Numeric, DateFormat::Iso, DateFormat::Long];
+
+    /// The chrono format string, see https://docs.rs/chrono/latest/chrono/format/strftime/
+    pub fn pattern(self) -> &'static str {
+        match self {
+            DateFormat::Short => "%a %d %b",
+            DateFormat::Numeric => "%d.%m.%Y",
+            DateFormat::Iso => "%Y-%m-%d",
+            DateFormat::Long => "%A, %d %B",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClockOptions {
+    /// 14:05 instead of 2:05 PM.
+    pub hour24: bool,
+    pub seconds: bool,
+    pub date: DateFormat,
+    /// Hours from UTC for another time zone (e.g. 9 for Tokyo); `None` = this PC's time zone.
+    pub utc_offset: Option<f32>,
+}
+
+impl Default for ClockOptions {
+    fn default() -> Self {
+        Self { hour24: true, seconds: false, date: DateFormat::Short, utc_offset: None }
+    }
+}
+
 /// One desktop widget's settings. Lives in an `Entity` so its window can watch it.
 pub struct WidgetConfig {
     pub kind: WidgetKind,
@@ -43,19 +120,35 @@ pub struct WidgetConfig {
     pub show_temperature: bool,
     /// Widgets that have one (CPU, RAM, network): draw the last minute as a graph instead of a bar.
     pub show_graph: bool,
+    pub parts: Parts,
+    pub thresholds: Thresholds,
+    pub clock: ClockOptions,
+    /// Can't be dragged.
+    pub locked: bool,
 }
 
 pub struct Dashboard {
     pub shared_style: Entity<WidgetStyle>,
     pub widgets: Vec<Entity<WidgetConfig>>,
+    /// Widgets snap to a grid of `grid_size` (logical pixels) while dragged.
+    pub snap_to_grid: bool,
+    pub grid_size: f32,
 }
 
 // What actually goes into the file: plain values, no entities.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct DashboardFile {
     shared_style: WidgetStyle,
     widgets: Vec<WidgetFile>,
+    snap_to_grid: bool,
+    grid_size: f32,
+}
+
+impl Default for DashboardFile {
+    fn default() -> Self {
+        Self { shared_style: WidgetStyle::default(), widgets: Vec::new(), snap_to_grid: false, grid_size: 20. }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -70,6 +163,10 @@ struct WidgetFile {
     disk: String,
     show_temperature: bool,
     show_graph: bool,
+    parts: Parts,
+    thresholds: Thresholds,
+    clock: ClockOptions,
+    locked: bool,
 }
 
 impl Default for WidgetFile {
@@ -84,6 +181,10 @@ impl Default for WidgetFile {
             disk: "C:\\".into(),
             show_temperature: true,
             show_graph: true,
+            parts: Parts::default(),
+            thresholds: Thresholds::default(),
+            clock: ClockOptions::default(),
+            locked: false,
         }
     }
 }
@@ -99,6 +200,10 @@ impl WidgetFile {
             disk: self.disk,
             show_temperature: self.show_temperature,
             show_graph: self.show_graph,
+            parts: self.parts,
+            thresholds: self.thresholds,
+            clock: self.clock,
+            locked: self.locked,
         }
     }
 }
@@ -126,9 +231,15 @@ impl Dashboard {
             // Older versions saved a single widget style; keep it as the shared one.
             shared_style: read_json("widget-style.json").unwrap_or_default(),
             widgets: vec![WidgetFile { enabled: true, ..Default::default() }],
+            ..Default::default()
         });
         let widgets = file.widgets.into_iter().map(|widget| cx.new(|cx| widget.into_config(cx))).collect();
-        Self { shared_style: cx.new(|_| file.shared_style), widgets }
+        Self {
+            shared_style: cx.new(|_| file.shared_style),
+            widgets,
+            snap_to_grid: file.snap_to_grid,
+            grid_size: file.grid_size,
+        }
     }
 
     /// Adds a new widget of `kind`, shown, placed below the others so they don't overlap.
@@ -165,9 +276,15 @@ impl Dashboard {
                         disk: widget.disk.clone(),
                         show_temperature: widget.show_temperature,
                         show_graph: widget.show_graph,
+                        parts: widget.parts.clone(),
+                        thresholds: widget.thresholds,
+                        clock: widget.clock,
+                        locked: widget.locked,
                     }
                 })
                 .collect(),
+            snap_to_grid: self.snap_to_grid,
+            grid_size: self.grid_size,
         };
 
         let path = config_file("dashboard.json").ok_or(std::io::ErrorKind::NotFound)?;

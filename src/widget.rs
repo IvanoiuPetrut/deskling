@@ -3,6 +3,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +45,17 @@ pub struct WidgetStyle {
     pub border_color: Hsla,
     /// Blur of the desktop behind the widget, in pixels. 0 = no glass, plain see-through.
     pub blur: f32,
+    /// Font name, e.g. "Segoe UI"; empty = the default font.
+    pub font_family: String,
+    /// 100 (thin) to 900 (black); 400 is regular, 700 bold.
+    pub font_weight: f32,
+    /// Size of the small label, in % of `font_size`.
+    pub label_size: f32,
+    /// Color of bars and graphs.
+    pub accent_color: Hsla,
+    /// Used instead of the accent (and for the value) above the warning / critical threshold.
+    pub warning_color: Hsla,
+    pub critical_color: Hsla,
 }
 
 impl Default for WidgetStyle {
@@ -61,6 +73,12 @@ impl Default for WidgetStyle {
             border_width: 1.,
             border_color: white().opacity(0.3),
             blur: 0.,
+            font_family: String::new(),
+            font_weight: 400.,
+            label_size: 45.,
+            accent_color: white(),
+            warning_color: rgb(0xf5a623).into(),
+            critical_color: rgb(0xff4d4f).into(),
         }
     }
 }
@@ -245,8 +263,22 @@ fn history_graph(graph: Graph, color: Hsla) -> Canvas<()> {
 impl Render for DesktopWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Content { label, value, bar, graph } = self.content(cx);
-        let show_graph = self.config.read(cx).show_graph;
+        let config = self.config.read(cx);
+        let (parts, thresholds, show_graph, locked) =
+            (config.parts.clone(), config.thresholds, config.show_graph, config.locked);
         let style = self.style(cx).clone();
+
+        // A custom label from the dashboard replaces the automatic one.
+        let label = if parts.label.trim().is_empty() { label } else { parts.label };
+
+        // Usage in % (the bar's fill), for the threshold colors. Widgets without a bar have none.
+        let usage = bar.map(|fill| fill * 100.);
+        let level_color = match usage {
+            Some(usage) if thresholds.enabled && usage >= thresholds.critical => Some(style.critical_color),
+            Some(usage) if thresholds.enabled && usage >= thresholds.warning => Some(style.warning_color),
+            _ => None,
+        };
+        let accent = level_color.unwrap_or(style.accent_color);
 
         // The graph replaces the bar when it's turned on and the widget has one.
         let (bar, graph) = match graph {
@@ -261,22 +293,27 @@ impl Render for DesktopWidget {
             .flex_col()
             .items_center()
             .gap_1()
-            .child(div().text_size(px(style.font_size * 0.45)).opacity(0.8).child(label))
-            .child(div().child(value))
-            .children(bar.map(|fill| {
-                div()
-                    .w(relative(0.8))
-                    .h(px(4.))
-                    .rounded_full()
-                    .bg(style.text_color.opacity(0.2))
-                    .child(div().h_full().w(relative(fill.clamp(0., 1.))).rounded_full().bg(style.text_color))
-            }))
-            .children(graph.map(|graph| {
-                div()
-                    .w(relative(0.85))
-                    .h(px(style.font_size * 1.1))
-                    .child(history_graph(graph, style.text_color).size_full())
-            }));
+            .when(parts.show_label, |text| {
+                text.child(
+                    div().text_size(px(style.font_size * style.label_size / 100.)).opacity(0.8).child(label),
+                )
+            })
+            .when(parts.show_value, |text| {
+                text.child(div().when_some(level_color, |value, color| value.text_color(color)).child(value))
+            })
+            .when(parts.show_bar, |text| {
+                text.children(bar.map(|fill| {
+                    div()
+                        .w(relative(0.8))
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(accent.opacity(0.25))
+                        .child(div().h_full().w(relative(fill.clamp(0., 1.))).rounded_full().bg(accent))
+                }))
+                .children(graph.map(|graph| {
+                    div().w(relative(0.85)).h(px(style.font_size * 1.1)).child(history_graph(graph, accent).size_full())
+                }))
+            });
 
         // Layers, back to front: blurred desktop, tint (background color + opacity), text.
         let content = |radius: f32| {
@@ -290,6 +327,8 @@ impl Render for DesktopWidget {
                 .rounded(px(radius))
                 .text_color(style.text_color)
                 .text_size(px(style.font_size))
+                .font_weight(FontWeight(style.font_weight))
+                .when(!style.font_family.is_empty(), |content| content.font_family(style.font_family.clone()))
                 .children(self.glass.clone().map(|glass| {
                     img(glass)
                         .absolute()
@@ -311,7 +350,8 @@ impl Render for DesktopWidget {
         let frame = div()
             .size_full()
             .rounded(px(style.corner_radius))
-            .window_control_area(WindowControlArea::Drag);
+            // Grabbing anywhere drags the window, unless the widget is locked.
+            .when(!locked, |frame| frame.window_control_area(WindowControlArea::Drag));
 
         match style.border {
             BorderKind::None => frame.child(content(style.corner_radius)),
@@ -369,17 +409,25 @@ pub fn open(
     handle.into()
 }
 
+/// Makes dragged widgets snap to a grid of `size` logical pixels, or turns snapping off (`None`).
+pub fn set_snap_grid(size: Option<f32>) {
+    #[cfg(windows)]
+    win32::set_snap_grid(size);
+    #[cfg(not(windows))]
+    let _ = size;
+}
+
 /// Keeps the widget on the desktop layer, like a Rainmeter skin set to "On desktop":
 /// below every normal window, but always directly above the desktop itself, so it
 /// also stays visible after Win+D (which raises the desktop over everything).
 #[cfg(windows)]
 mod win32 {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
     use gpui_kit::Window;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
         DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
@@ -393,13 +441,14 @@ mod win32 {
         DWMWCP_DONOTROUND, DwmSetWindowAttribute,
     };
     use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
         EVENT_SYSTEM_FOREGROUND, FindWindowW, GW_HWNDPREV, GWL_EXSTYLE, GetWindow, GetWindowLongW,
         GetWindowRect,
         HWND_BOTTOM, HWND_TOP, KillTimer, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         SWP_NOZORDER, SetTimer, SetWindowPos, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_NCCALCSIZE,
-        WM_NCDESTROY, WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WS_EX_TOPMOST,
+        GetCursorPos, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_MOVING, WM_NCDESTROY, WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WS_EX_TOPMOST,
     };
     use windows::core::{PCWSTR, w};
 
@@ -416,6 +465,15 @@ mod win32 {
     static WIDGETS: Mutex<Vec<(isize, u32)>> = Mutex::new(Vec::new());
     static FOREGROUND_HOOK: AtomicIsize = AtomicIsize::new(0);
     static PLACING: AtomicBool = AtomicBool::new(false);
+    /// Snap grid in logical pixels; 0 = off.
+    static SNAP_GRID: AtomicU32 = AtomicU32::new(0);
+    /// While a widget is dragged: where the cursor grabbed it, relative to its top-left corner.
+    static GRAB_OFFSET: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+
+    pub fn set_snap_grid(size: Option<f32>) {
+        let size = size.map_or(0, |size| size.round().max(1.) as u32);
+        SNAP_GRID.store(size, Ordering::Relaxed);
+    }
 
     fn widget_windows() -> Vec<HWND> {
         WIDGETS.lock().unwrap().iter().map(|(hwnd, _)| HWND(*hwnd as *mut _)).collect()
@@ -639,6 +697,39 @@ mod win32 {
         _data: usize,
     ) -> LRESULT {
         match msg {
+            // A drag starts: remember where on the widget the cursor grabbed it.
+            WM_ENTERSIZEMOVE => {
+                let mut cursor = POINT::default();
+                let mut rect = RECT::default();
+                if unsafe { GetCursorPos(&mut cursor).is_ok() && GetWindowRect(hwnd, &mut rect).is_ok() } {
+                    *GRAB_OFFSET.lock().unwrap() = Some((cursor.x - rect.left, cursor.y - rect.top));
+                }
+            }
+            WM_EXITSIZEMOVE => *GRAB_OFFSET.lock().unwrap() = None,
+            // Being dragged: Windows lets us adjust the new rectangle before it moves there.
+            WM_MOVING => {
+                let grid = SNAP_GRID.load(Ordering::Relaxed);
+                let grab = *GRAB_OFFSET.lock().unwrap();
+                let mut cursor = POINT::default();
+                if grid > 0
+                    && let Some((grab_x, grab_y)) = grab
+                    && unsafe { GetCursorPos(&mut cursor) }.is_ok()
+                {
+                    // The rectangle is in physical pixels; the grid is in logical ones.
+                    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+                    let grid = (grid * dpi / 96) as i32;
+                    let snap = |value: i32| ((value as f32 / grid as f32).round() as i32) * grid;
+                    let rect = unsafe { &mut *(lparam.0 as *mut RECT) };
+                    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+                    // Work from the real cursor rather than the proposed rectangle, so snapping
+                    // never builds up: the widget follows the mouse, in grid steps.
+                    rect.left = snap(cursor.x - grab_x);
+                    rect.top = snap(cursor.y - grab_y);
+                    rect.right = rect.left + width;
+                    rect.bottom = rect.top + height;
+                    return LRESULT(1);
+                }
+            }
             // "The client area is the whole window": no frame left for Windows to draw.
             // Returned before GPUI sees it, because GPUI keeps the side and bottom frame.
             WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),

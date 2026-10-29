@@ -1,9 +1,17 @@
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::radio::RadioGroup;
+use gpui_kit::component::searchable_list::SearchableVec;
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::*;
 
 use crate::widget::{BorderKind, WidgetStyle};
+
+/// First entry of the font list; picking it means "the default font" (an empty `font_family`).
+const DEFAULT_FONT: &str = "Default";
+
+type FontList = SearchableVec<SharedString>;
 
 /// One slider row: its label, its UI state, and how to read its value from the style.
 struct NumberSetting {
@@ -22,6 +30,10 @@ pub struct WidgetSettings {
     text_color: Entity<ColorPickerState>,
     background: Entity<ColorPickerState>,
     border_color: Entity<ColorPickerState>,
+    accent_color: Entity<ColorPickerState>,
+    warning_color: Entity<ColorPickerState>,
+    critical_color: Entity<ColorPickerState>,
+    font: Entity<SelectState<FontList>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -39,14 +51,31 @@ impl WidgetSettings {
             Self::number(&style, "Background opacity", "%", (0., 100., 1.), |s| s.opacity * 100., |s, v| s.opacity = v / 100., &mut subs, cx),
             Self::number(&style, "Border width", "px", (1., 12., 1.), |s| s.border_width, |s, v| s.border_width = v, &mut subs, cx),
             Self::number(&style, "Glass blur", "px", (0., 40., 1.), |s| s.blur, |s, v| s.blur = v, &mut subs, cx),
+            Self::number(&style, "Font weight", "", (100., 900., 100.), |s| s.font_weight, |s, v| s.font_weight = v, &mut subs, cx),
+            Self::number(&style, "Label size", "% of font size", (20., 100., 1.), |s| s.label_size, |s, v| s.label_size = v, &mut subs, cx),
         ];
 
         let current = style.read(cx).clone();
         let text_color = Self::color(&style, current.text_color, |s, c| s.text_color = c, &mut subs, window, cx);
         let background = Self::color(&style, current.background, |s, c| s.background = c, &mut subs, window, cx);
         let border_color = Self::color(&style, current.border_color, |s, c| s.border_color = c, &mut subs, window, cx);
+        let accent_color = Self::color(&style, current.accent_color, |s, c| s.accent_color = c, &mut subs, window, cx);
+        let warning_color = Self::color(&style, current.warning_color, |s, c| s.warning_color = c, &mut subs, window, cx);
+        let critical_color = Self::color(&style, current.critical_color, |s, c| s.critical_color = c, &mut subs, window, cx);
+        let font = Self::font_picker(&style, &current.font_family, &mut subs, window, cx);
 
-        Self { style, numbers, text_color, background, border_color, _subscriptions: subs }
+        Self {
+            style,
+            numbers,
+            text_color,
+            background,
+            border_color,
+            accent_color,
+            warning_color,
+            critical_color,
+            font,
+            _subscriptions: subs,
+        }
     }
 
     /// Makes a slider that edits one number in the style.
@@ -76,6 +105,35 @@ impl WidgetSettings {
         }));
 
         NumberSetting { label, unit, slider, get }
+    }
+
+    /// A searchable list of the fonts installed on this PC.
+    fn font_picker(
+        style: &Entity<WidgetStyle>,
+        current: &str,
+        subs: &mut Vec<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SelectState<FontList>> {
+        let mut fonts: Vec<SharedString> = cx.text_system().all_font_names().into_iter().map(Into::into).collect();
+        fonts.sort();
+        fonts.dedup();
+        fonts.insert(0, DEFAULT_FONT.into());
+        let current = if current.is_empty() { DEFAULT_FONT } else { current };
+        let selected = fonts.iter().position(|font| font == current).map(IndexPath::new);
+        let picker = cx.new(|cx| SelectState::new(SearchableVec::new(fonts), selected, window, cx).searchable(true));
+
+        let style = style.clone();
+        subs.push(cx.subscribe(&picker, move |_, _, event: &SelectEvent<FontList>, cx| {
+            if let SelectEvent::Confirm(Some(font)) = event {
+                let family = if font == DEFAULT_FONT { String::new() } else { font.to_string() };
+                style.update(cx, |style, cx| {
+                    style.font_family = family;
+                    cx.notify();
+                });
+            }
+        }));
+        picker
     }
 
     /// Makes a color picker that edits one color in the style.
@@ -113,6 +171,7 @@ impl Render for WidgetSettings {
             .flex_col()
             .gap_4()
             .w_full()
+            .child(div().flex().flex_col().gap_1().child("Font").child(Select::new(&self.font)))
             .children(self.numbers.iter().map(|number| {
                 div()
                     .flex()
@@ -148,6 +207,15 @@ impl Render for WidgetSettings {
                     .child(ColorPicker::new(&self.text_color).label("Text"))
                     .child(ColorPicker::new(&self.background).label("Background"))
                     .child(ColorPicker::new(&self.border_color).label("Border")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_4()
+                    .child(ColorPicker::new(&self.accent_color).label("Bars & graphs"))
+                    .child(ColorPicker::new(&self.warning_color).label("Warning"))
+                    .child(ColorPicker::new(&self.critical_color).label("Critical")),
             )
     }
 }

@@ -7,6 +7,8 @@ mod disk;
 mod network;
 mod ram;
 
+pub use clock::utc_name;
+
 use crate::dashboard::{WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
 
