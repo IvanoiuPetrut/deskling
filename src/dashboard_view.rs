@@ -679,7 +679,17 @@ impl Render for DashboardView {
                     .flex_1()
                     .min_h_0()
                     .child(self.sidebar(cx))
-                    .child(div().id("options").flex_1().overflow_y_scroll().p_6().child(options)),
+                    // `min_w_0`: a flex item won't shrink below its content's width otherwise (like
+                    // CSS `min-width: auto`), so long text and sliders would run past the window edge.
+                    .child(
+                        div()
+                            .id("options")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_y_scroll()
+                            .p_6()
+                            .child(options.w_full()),
+                    ),
             )
     }
 }
