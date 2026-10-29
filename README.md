@@ -1,7 +1,8 @@
 # gpui-hello
 
 A small [GPUI](https://www.gpui.rs/) app for learning Rust: desktop widgets (clock, CPU, RAM, disk
-space), similar to Rainmeter skins, with a dashboard window to turn them on and style them.
+space, network), similar to Rainmeter skins, with a dashboard window to add, remove and style them,
+and a tray icon.
 
 ## Requirements
 
@@ -19,8 +20,15 @@ cargo run
 The first build downloads and compiles every dependency, so it takes a few minutes. Later builds
 only recompile your own code.
 
-To stop the app, close the dashboard window (that also closes the widgets), or press `Ctrl+C`
-in the terminal.
+Closing the dashboard only hides it: the widgets keep running and the app stays in the tray
+(notification area). Click the tray icon to open the dashboard again. To stop the app, use **Quit**
+in the dashboard or right-click the tray icon → **Quit** (or press `Ctrl+C` in the terminal).
+
+Run with `--hidden` to start with only the widgets and the tray icon:
+
+```bash
+cargo run -- --hidden
+```
 
 ### Other useful commands
 
@@ -36,30 +44,45 @@ in the terminal.
 ```
 Cargo.toml      dependencies and build settings (like package.json)
 src/
-├── main.rs             entry point: starts the stats reader and opens the dashboard
+├── main.rs             entry point: stats reader, dashboard window, tray icon
 ├── dashboard.rs        the list of widgets and their settings; saving/loading dashboard.json
 ├── dashboard_view.rs   the dashboard window: widget list on the left, options on the right
-├── stats.rs            reads CPU, RAM, disk and temperature numbers once a second
-├── widget.rs           the desktop widget window, its WidgetStyle, and the Windows code that pins it
+├── stats.rs            reads CPU, RAM, disk, network and temperature once a second, keeps history
+├── tray.rs             tray icon, hiding/showing the dashboard, "Start with Windows" (Windows only)
+├── widget.rs           the desktop widget window, its WidgetStyle, graphs, and the Windows pinning code
 ├── widget_settings.rs  the style editor: sliders, border type and color pickers
-└── glass.rs            the glass effect: crops and blurs a picture of the desktop behind a widget
+├── glass.rs            the glass effect: crops and blurs a picture of the desktop behind a widget
+└── widgets/            one file per widget type, each implementing the `WidgetType` trait
+    ├── mod.rs          the trait and the kind → type lookup
+    ├── clock.rs  cpu.rs  ram.rs  disk.rs  network.rs
 ```
 
 ## The dashboard
 
 The window that opens is the dashboard. On the left is the list of widgets, each with a switch
-that shows or hides it on the desktop; click a widget to see its options on the right.
+that shows or hides it on the desktop; click a widget to see its options on the right. **Add widget**
+adds a new one (several of the same type are fine, e.g. two Disk widgets for C: and D:), and
+**Remove widget** on its options page removes it.
 
 | Widget | Shows | Options |
 |---|---|---|
 | Clock | time and date | |
-| CPU | usage in %, and the temperature | show temperature |
-| RAM | used / total and % | |
+| CPU | usage in %, and the temperature | show temperature, history graph |
+| RAM | used / total and % | history graph |
 | Disk space | free space on one drive | which drive |
+| Network | download and upload speed (all adapters) | history graph |
+
+The **history graph** replaces the usage bar with a small chart of the last minute.
 
 Each widget either uses the **Shared style** (default) or, with **Use shared style** turned off,
 its own style. A style covers size, padding, corner radius, font size, background opacity,
 border (none / solid / dashed) and width, glass blur, and the text, background and border colors.
+
+**Start with Windows** (in the dashboard header) adds the app to your sign-in programs (the
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key), started with `--hidden`.
+It records the path of the program you're running now, so use it from a release build
+(`cargo build --release`, then run `target\release\gpui-hello.exe`): `cargo clean` or moving
+the project would break a path into `target\debug`.
 
 **Save** writes everything (which widgets are shown, their options, styles and positions) to
 `%APPDATA%\gpui-hello\dashboard.json`, and the app loads it on the next start. Delete that file to
@@ -78,6 +101,9 @@ go back to the defaults. A `widget-style.json` from an older version is picked u
   (`MSAcpi_ThermalZoneTemperature`), which usually only answers apps run as administrator, and
   often reports a motherboard "thermal zone" rather than the exact CPU core temperature. When
   there's no answer the widget shows "temp n/a".
+
+To add a new widget type: add a variant to `WidgetKind` in `dashboard.rs`, a file in
+`src/widgets/` with a struct implementing `WidgetType`, and a line in `widget_type()`.
 
 ## Notes
 

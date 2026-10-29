@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
-use crate::dashboard::{WidgetConfig, WidgetKind};
+use crate::dashboard::WidgetConfig;
 use crate::glass::{self, ScreenRect};
-use crate::stats::SystemStats;
+use crate::stats::{HISTORY_LEN, SystemStats};
+use crate::widgets::{Content, Graph, widget_type};
 
 /// How often the desktop picture behind the glass is retaken, to catch wallpaper/icon changes.
 const GLASS_REFRESH: Duration = Duration::from_secs(10);
@@ -82,11 +83,6 @@ fn desktop_snapshot() -> Option<Rc<glass::Snapshot>> {
         *cached = Some((Instant::now(), Rc::downgrade(&snapshot)));
         Some(snapshot)
     })
-}
-
-/// 1 GB as Windows Explorer counts it (1024 x 1024 x 1024 bytes).
-pub fn gigabytes(bytes: u64) -> String {
-    format!("{:.1} GB", bytes as f64 / (1024. * 1024. * 1024.))
 }
 
 /// One widget window on the desktop: a clock, CPU, RAM or disk, depending on its config.
@@ -201,47 +197,62 @@ impl DesktopWidget {
         cx.notify();
     }
 
-    /// What the widget shows: a small label, the big value, and an optional bar (0.0–1.0).
-    fn lines(&self, cx: &App) -> (String, String, Option<f32>) {
+    /// What the widget shows right now, from its widget type (see `src/widgets/`).
+    fn content(&self, cx: &App) -> Content {
         let config = self.config.read(cx);
-        let stats = self.stats.read(cx);
-        match config.kind {
-            WidgetKind::Clock => {
-                let now = chrono::Local::now();
-                (now.format("%a %d %b").to_string(), now.format("%H:%M").to_string(), None)
-            }
-            WidgetKind::Cpu => {
-                let label = match (config.show_temperature, stats.cpu_temperature) {
-                    (false, _) => "CPU".to_string(),
-                    (true, Some(celsius)) => format!("CPU · {celsius:.0} °C"),
-                    (true, None) => "CPU · temp n/a".to_string(),
-                };
-                (label, format!("{:.0}%", stats.cpu_usage), Some(stats.cpu_usage / 100.))
-            }
-            WidgetKind::Ram => {
-                let used = stats.ram_used as f32 / stats.ram_total.max(1) as f32;
-                (
-                    format!("RAM · {} / {}", gigabytes(stats.ram_used), gigabytes(stats.ram_total)),
-                    format!("{:.0}%", used * 100.),
-                    Some(used),
-                )
-            }
-            WidgetKind::Disk => match stats.disk(&config.disk).or(stats.disks.first()) {
-                Some(disk) => (
-                    format!("{} free of {}", disk.mount, gigabytes(disk.total)),
-                    gigabytes(disk.free),
-                    Some(1. - disk.free as f32 / disk.total.max(1) as f32),
-                ),
-                None => ("Disk".into(), "–".into(), None),
-            },
-        }
+        widget_type(config.kind).content(config, self.stats.read(cx))
     }
+}
+
+/// A small area chart of `graph`, newest value at the right edge, drawn with GPUI paths.
+fn history_graph(graph: Graph, color: Hsla) -> Canvas<()> {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let points = graph.points;
+            if points.len() < 2 {
+                return;
+            }
+            let step = bounds.size.width / (HISTORY_LEN - 1) as f32;
+            let first_slot = HISTORY_LEN - points.len();
+            let x = |i: usize| bounds.left() + step * (first_slot + i) as f32;
+            let y = |value: f32| bounds.bottom() - bounds.size.height * (value / graph.max).clamp(0., 1.);
+
+            // Filled area under the line, then the line on top.
+            let mut area = PathBuilder::fill();
+            area.move_to(point(x(0), bounds.bottom()));
+            for (i, value) in points.iter().enumerate() {
+                area.line_to(point(x(i), y(*value)));
+            }
+            area.line_to(point(x(points.len() - 1), bounds.bottom()));
+            area.close();
+            if let Ok(path) = area.build() {
+                window.paint_path(path, color.opacity(0.25));
+            }
+
+            let mut line = PathBuilder::stroke(px(1.5));
+            line.move_to(point(x(0), y(points[0])));
+            for (i, value) in points.iter().enumerate().skip(1) {
+                line.line_to(point(x(i), y(*value)));
+            }
+            if let Ok(path) = line.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
 }
 
 impl Render for DesktopWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, value, bar) = self.lines(cx);
+        let Content { label, value, bar, graph } = self.content(cx);
+        let show_graph = self.config.read(cx).show_graph;
         let style = self.style(cx).clone();
+
+        // The graph replaces the bar when it's turned on and the widget has one.
+        let (bar, graph) = match graph {
+            Some(graph) if show_graph => (None, Some(graph)),
+            _ => (bar, None),
+        };
 
         let text = div()
             .relative()
@@ -259,6 +270,12 @@ impl Render for DesktopWidget {
                     .rounded_full()
                     .bg(style.text_color.opacity(0.2))
                     .child(div().h_full().w(relative(fill.clamp(0., 1.))).rounded_full().bg(style.text_color))
+            }))
+            .children(graph.map(|graph| {
+                div()
+                    .w(relative(0.85))
+                    .h(px(style.font_size * 1.1))
+                    .child(history_graph(graph, style.text_color).size_full())
             }));
 
         // Layers, back to front: blurred desktop, tint (background color + opacity), text.

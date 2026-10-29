@@ -6,6 +6,7 @@ use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
 use crate::widget::WidgetStyle;
+use crate::widgets::widget_type;
 
 #[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum WidgetKind {
@@ -14,18 +15,15 @@ pub enum WidgetKind {
     Cpu,
     Ram,
     Disk,
+    Network,
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 4] = [WidgetKind::Clock, WidgetKind::Cpu, WidgetKind::Ram, WidgetKind::Disk];
+    pub const ALL: [WidgetKind; 5] =
+        [WidgetKind::Clock, WidgetKind::Cpu, WidgetKind::Ram, WidgetKind::Disk, WidgetKind::Network];
 
     pub fn name(self) -> &'static str {
-        match self {
-            WidgetKind::Clock => "Clock",
-            WidgetKind::Cpu => "CPU",
-            WidgetKind::Ram => "RAM",
-            WidgetKind::Disk => "Disk space",
-        }
+        widget_type(self).name()
     }
 }
 
@@ -43,6 +41,8 @@ pub struct WidgetConfig {
     pub disk: String,
     /// CPU widget: also show the temperature.
     pub show_temperature: bool,
+    /// Widgets that have one (CPU, RAM, network): draw the last minute as a graph instead of a bar.
+    pub show_graph: bool,
 }
 
 pub struct Dashboard {
@@ -69,6 +69,7 @@ struct WidgetFile {
     y: f32,
     disk: String,
     show_temperature: bool,
+    show_graph: bool,
 }
 
 impl Default for WidgetFile {
@@ -82,6 +83,22 @@ impl Default for WidgetFile {
             y: 100.,
             disk: "C:\\".into(),
             show_temperature: true,
+            show_graph: true,
+        }
+    }
+}
+
+impl WidgetFile {
+    fn into_config(self, cx: &mut App) -> WidgetConfig {
+        WidgetConfig {
+            kind: self.kind,
+            enabled: self.enabled,
+            use_shared_style: self.use_shared_style,
+            style: cx.new(|_| self.style),
+            position: point(px(self.x), px(self.y)),
+            disk: self.disk,
+            show_temperature: self.show_temperature,
+            show_graph: self.show_graph,
         }
     }
 }
@@ -103,41 +120,30 @@ fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
 }
 
 impl Dashboard {
-    /// The saved dashboard, or a fresh one (with only the clock shown) the first time.
+    /// The saved dashboard, or a fresh one (with just a clock) the first time.
     pub fn load(cx: &mut App) -> Self {
         let file = read_json::<DashboardFile>("dashboard.json").unwrap_or_else(|| DashboardFile {
             // Older versions saved a single widget style; keep it as the shared one.
             shared_style: read_json("widget-style.json").unwrap_or_default(),
-            widgets: Vec::new(),
+            widgets: vec![WidgetFile { enabled: true, ..Default::default() }],
         });
-
-        // Every kind gets exactly one entry, in a fixed order, even if the file lacks some.
-        let widgets = WidgetKind::ALL
-            .iter()
-            .enumerate()
-            .map(|(index, &kind)| {
-                let saved = file.widgets.iter().find(|widget| widget.kind == kind);
-                let default_place = WidgetFile {
-                    kind,
-                    enabled: kind == WidgetKind::Clock,
-                    y: 100. + index as f32 * 130.,
-                    ..Default::default()
-                };
-                let saved = saved.unwrap_or(&default_place);
-                let style = cx.new(|_| saved.style.clone());
-                cx.new(|_| WidgetConfig {
-                    kind,
-                    enabled: saved.enabled,
-                    use_shared_style: saved.use_shared_style,
-                    style,
-                    position: point(px(saved.x), px(saved.y)),
-                    disk: saved.disk.clone(),
-                    show_temperature: saved.show_temperature,
-                })
-            })
-            .collect();
-
+        let widgets = file.widgets.into_iter().map(|widget| cx.new(|cx| widget.into_config(cx))).collect();
         Self { shared_style: cx.new(|_| file.shared_style), widgets }
+    }
+
+    /// Adds a new widget of `kind`, shown, placed below the others so they don't overlap.
+    pub fn add(&mut self, kind: WidgetKind, cx: &mut App) -> Entity<WidgetConfig> {
+        let count = self.widgets.len() as f32;
+        let widget = WidgetFile {
+            kind,
+            enabled: true,
+            x: 100. + (count / 6.).floor() * 260.,
+            y: 100. + (count % 6.) * 130.,
+            ..Default::default()
+        };
+        let config = cx.new(|cx| widget.into_config(cx));
+        self.widgets.push(config.clone());
+        config
     }
 
     /// Writes everything to `dashboard.json` and returns where it went.
@@ -158,6 +164,7 @@ impl Dashboard {
                         y: widget.position.y.into(),
                         disk: widget.disk.clone(),
                         show_temperature: widget.show_temperature,
+                        show_graph: widget.show_graph,
                     }
                 })
                 .collect(),

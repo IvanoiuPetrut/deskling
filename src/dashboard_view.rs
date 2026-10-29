@@ -4,13 +4,15 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::Sizable;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::dashboard::{Dashboard, WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
-use crate::widget::{self, gigabytes};
+use crate::widget;
 use crate::widget_settings::WidgetSettings;
+use crate::widgets::{gigabytes, widget_type};
 
 /// Which item of the list on the left is open on the right.
 #[derive(Clone, Copy, PartialEq)]
@@ -28,8 +30,11 @@ pub struct DashboardView {
     shared_panel: Entity<WidgetSettings>,
     /// Each widget's own style editor, in the same order as `dashboard.widgets`.
     widget_panels: Vec<Entity<WidgetSettings>>,
-    /// Result of the last "Save" click.
+    /// Result of the last "Save" (or "Start with Windows") click.
     save_status: Option<SharedString>,
+    /// With a tray icon, closing the dashboard only hides it; without one, it quits the app.
+    has_tray: bool,
+    starts_with_windows: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -37,6 +42,7 @@ impl DashboardView {
     pub fn new(
         dashboard: Dashboard,
         stats: Entity<SystemStats>,
+        has_tray: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -59,8 +65,17 @@ impl DashboardView {
             }
         })];
 
-        // Closing the dashboard quits the app; otherwise the widgets would keep it running.
-        window.on_window_should_close(cx, |_, cx| {
+        // With a tray icon, closing the dashboard just hides it (bring it back from the tray).
+        // Without one, closing quits; otherwise the widgets would keep the app running unseen.
+        #[cfg(windows)]
+        let raw_hwnd = crate::tray::raw_hwnd(window);
+        window.on_window_should_close(cx, move |_, cx| {
+            #[cfg(windows)]
+            if has_tray && let Some(hwnd) = raw_hwnd {
+                // Hidden from a task, after GPUI is done handling this close request.
+                cx.spawn(async move |_| crate::tray::set_window_visible(hwnd, false)).detach();
+                return false;
+            }
             cx.quit();
             true
         });
@@ -80,10 +95,15 @@ impl DashboardView {
             dashboard,
             stats,
             windows: vec![None; count],
-            selected: Selected::Widget(0),
+            selected: if count > 0 { Selected::Widget(0) } else { Selected::SharedStyle },
             shared_panel,
             widget_panels,
             save_status: None,
+            has_tray,
+            #[cfg(windows)]
+            starts_with_windows: crate::tray::starts_with_windows(),
+            #[cfg(not(windows))]
+            starts_with_windows: false,
             _subscriptions: subscriptions,
         }
     }
@@ -120,10 +140,43 @@ impl DashboardView {
         }
     }
 
+    /// Adds a new widget of `kind`, shows it on the desktop and opens its options.
+    fn add_widget(&mut self, kind: WidgetKind, window: &mut Window, cx: &mut Context<Self>) {
+        let config = self.dashboard.add(kind, cx);
+        let style = config.read(cx).style.clone();
+        self.widget_panels.push(cx.new(|cx| WidgetSettings::new(style, window, cx)));
+        self.windows.push(None);
+        let index = self.dashboard.widgets.len() - 1;
+        self.set_shown(index, true, cx);
+        self.selected = Selected::Widget(index);
+        cx.notify();
+    }
+
+    /// Closes a widget's window and forgets it (it's gone from the file on the next Save).
+    fn remove_widget(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.set_shown(index, false, cx);
+        self.dashboard.widgets.remove(index);
+        self.widget_panels.remove(index);
+        self.windows.remove(index);
+        self.selected = match self.dashboard.widgets.len() {
+            0 => Selected::SharedStyle,
+            count => Selected::Widget(index.min(count - 1)),
+        };
+        cx.notify();
+    }
+
+    /// The name shown in the list, e.g. "CPU" or "Disk space (D:\)".
+    fn widget_label(config: &WidgetConfig) -> SharedString {
+        match config.kind {
+            WidgetKind::Disk => format!("{} ({})", config.kind.name(), config.disk).into(),
+            kind => kind.name().into(),
+        }
+    }
+
     fn list_item(
         &self,
         id: impl Into<ElementId>,
-        label: &'static str,
+        label: impl Into<SharedString>,
         item: Selected,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -143,14 +196,14 @@ impl DashboardView {
                 this.selected = item;
                 cx.notify();
             }))
-            .child(label)
+            .child(label.into())
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let widgets = self.dashboard.widgets.iter().enumerate().map(|(index, config)| {
             let config = config.read(cx);
-            let (kind, enabled) = (config.kind, config.enabled);
-            self.list_item(("widget", index), kind.name(), Selected::Widget(index), cx).child(
+            let (label, enabled) = (Self::widget_label(config), config.enabled);
+            self.list_item(("widget", index), label, Selected::Widget(index), cx).child(
                 Switch::new(("shown", index)).checked(enabled).on_click(cx.listener(
                     move |this, shown: &bool, _, cx| {
                         this.set_shown(index, *shown, cx);
@@ -172,6 +225,12 @@ impl DashboardView {
             .border_color(black().opacity(0.1))
             .child(div().px_3().pb_1().text_sm().opacity(0.6).child("Widgets"))
             .children(widgets)
+            .child(div().px_3().pt_4().pb_1().text_sm().opacity(0.6).child("Add widget"))
+            .child(div().flex().flex_wrap().gap_1().px_2().children(WidgetKind::ALL.map(|kind| {
+                Button::new(("add", kind as usize)).small().label(format!("+ {}", kind.name())).on_click(
+                    cx.listener(move |this, _, window, cx| this.add_widget(kind, window, cx)),
+                )
+            })))
             .child(div().px_3().pt_4().pb_1().text_sm().opacity(0.6).child("Style"))
             .child(self.list_item("shared-style", "Shared style", Selected::SharedStyle, cx))
     }
@@ -179,7 +238,8 @@ impl DashboardView {
     fn widget_options(&self, index: usize, cx: &mut Context<Self>) -> Div {
         let config = self.dashboard.widgets[index].read(cx);
         let (kind, enabled, use_shared_style) = (config.kind, config.enabled, config.use_shared_style);
-        let (show_temperature, disk) = (config.show_temperature, config.disk.clone());
+        let (show_temperature, show_graph, disk) = (config.show_temperature, config.show_graph, config.disk.clone());
+        let has_graph = widget_type(kind).has_graph();
 
         let kind_options = match kind {
             WidgetKind::Cpu => Some(
@@ -215,14 +275,30 @@ impl DashboardView {
                     ),
                 )
             }
-            WidgetKind::Clock | WidgetKind::Ram => None,
+            WidgetKind::Clock | WidgetKind::Ram | WidgetKind::Network => None,
         };
+        let graph_option = has_graph.then(|| {
+            Checkbox::new("show-graph").checked(show_graph).label("Show history graph (last minute)").on_click(
+                cx.listener(move |this, checked: &bool, _, cx| {
+                    this.update_widget(index, cx, |config| config.show_graph = *checked);
+                }),
+            )
+        });
 
         div()
             .flex()
             .flex_col()
             .gap_4()
-            .child(div().text_xl().child(kind.name()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_xl().child(kind.name()))
+                    .child(Button::new("remove").small().label("Remove widget").on_click(cx.listener(
+                        move |this, _, _, cx| this.remove_widget(index, cx),
+                    ))),
+            )
             .child(
                 Switch::new("shown").checked(enabled).label("Show on desktop").on_click(cx.listener(
                     move |this, shown: &bool, _, cx| {
@@ -232,6 +308,7 @@ impl DashboardView {
                 )),
             )
             .children(kind_options)
+            .children(graph_option)
             .child(div().h(px(1.)).bg(black().opacity(0.1)))
             .child(
                 Switch::new("use-shared-style")
@@ -269,6 +346,16 @@ impl DashboardView {
             })
     }
 
+    fn set_starts_with_windows(&mut self, enabled: bool) {
+        #[cfg(windows)]
+        match crate::tray::set_starts_with_windows(enabled) {
+            Ok(()) => self.starts_with_windows = enabled,
+            Err(error) => self.save_status = Some(format!("Could not change Start with Windows: {error}").into()),
+        }
+        #[cfg(not(windows))]
+        let _ = enabled;
+    }
+
     fn shared_style_options(&self) -> Div {
         div()
             .flex()
@@ -298,6 +385,20 @@ impl Render for DashboardView {
             .child(div().text_xl().child("Desktop widgets"))
             .child(div().flex_1())
             .children(self.save_status.clone().map(|status| div().text_xs().opacity(0.7).child(status)))
+            .when(cfg!(windows), |header| {
+                header.child(
+                    Switch::new("start-with-windows")
+                        .checked(self.starts_with_windows)
+                        .label("Start with Windows")
+                        .on_click(cx.listener(|this, enabled: &bool, _, cx| {
+                            this.set_starts_with_windows(*enabled);
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(self.has_tray, |header| {
+                header.child(Button::new("quit").label("Quit").on_click(|_, _, cx| cx.quit()))
+            })
             .child(Button::new("save").primary().label("Save").on_click(cx.listener(|this, _, _, cx| {
                 this.save_status = Some(match this.dashboard.save(cx) {
                     Ok(path) => format!("Saved to {}", path.display()).into(),
