@@ -1,5 +1,7 @@
 //! The main window: the list of desktop widgets on the left, the selected one's options on the right.
 
+use std::time::Duration;
+
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
@@ -21,6 +23,7 @@ use crate::widgets::{gigabytes, utc_name, widget_type};
 #[derive(Clone, Copy, PartialEq)]
 enum Selected {
     Widget(usize),
+    General,
     SharedStyle,
     Themes,
     Layout,
@@ -113,8 +116,10 @@ pub struct DashboardView {
     theme_status: Option<SharedString>,
     /// The theme whose "Delete" was clicked once; a second click deletes it.
     confirm_delete: Option<String>,
-    /// Result of the last "Save" (or "Start with Windows") click.
+    /// Result of the last "Save" click.
     save_status: Option<SharedString>,
+    /// Shown on the General page when "Start with Windows" couldn't be changed.
+    startup_status: Option<SharedString>,
     /// With a tray icon, closing the dashboard only hides it; without one, it quits the app.
     has_tray: bool,
     starts_with_windows: bool,
@@ -192,6 +197,7 @@ impl DashboardView {
             theme_status: None,
             confirm_delete: None,
             save_status: None,
+            startup_status: None,
             has_tray,
             #[cfg(windows)]
             starts_with_windows: crate::tray::starts_with_windows(),
@@ -206,7 +212,7 @@ impl DashboardView {
     fn selected_kind(&self, cx: &App) -> Option<WidgetKind> {
         match self.selected {
             Selected::Widget(index) => Some(self.dashboard.widgets[index].read(cx).kind),
-            Selected::SharedStyle | Selected::Themes | Selected::Layout => None,
+            Selected::General | Selected::SharedStyle | Selected::Themes | Selected::Layout => None,
         }
     }
 
@@ -343,6 +349,7 @@ impl DashboardView {
                 )
             })))
             .child(heading("Settings"))
+            .child(self.list_item("general", "General", Selected::General, cx))
             .child(self.list_item("shared-style", "Shared style", Selected::SharedStyle, cx))
             .child(self.list_item("themes", "Themes", Selected::Themes, cx))
             .child(self.list_item("layout", "Layout", Selected::Layout, cx))
@@ -613,11 +620,79 @@ impl DashboardView {
     fn set_starts_with_windows(&mut self, enabled: bool) {
         #[cfg(windows)]
         match crate::tray::set_starts_with_windows(enabled) {
-            Ok(()) => self.starts_with_windows = enabled,
-            Err(error) => self.save_status = Some(format!("Could not change Start with Windows: {error}").into()),
+            Ok(()) => {
+                self.starts_with_windows = enabled;
+                self.startup_status = None;
+            }
+            Err(error) => self.startup_status = Some(format!("Could not change Start with Windows: {error}").into()),
         }
         #[cfg(not(windows))]
         let _ = enabled;
+    }
+
+    /// Writes the dashboard to disk. "Saved" goes away after a few seconds; an error stays.
+    fn save(&mut self, cx: &mut Context<Self>) {
+        let status: SharedString = match self.dashboard.save(cx) {
+            Ok(_) => "Saved".into(),
+            Err(error) => format!("Could not save: {error}").into(),
+        };
+        self.save_status = Some(status.clone());
+        cx.notify();
+        if status == "Saved" {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                this.update(cx, |this, cx| {
+                    // Unless something newer is showing by now.
+                    if this.save_status.as_ref() == Some(&status) {
+                        this.save_status = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn general_options(&self, cx: &mut Context<Self>) -> Div {
+        let folder = crate::dashboard::settings_folder();
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(div().text_xl().child("General"))
+            .when(cfg!(windows), |page| {
+                page.child(
+                    Switch::new("start-with-windows")
+                        .checked(self.starts_with_windows)
+                        .label("Start with Windows")
+                        .on_click(cx.listener(|this, enabled: &bool, _, cx| {
+                            this.set_starts_with_windows(*enabled);
+                            cx.notify();
+                        })),
+                )
+                .child(div().text_sm().opacity(0.7).child(
+                    "Starts the app when you sign in, with only the widgets and the tray icon. It remembers \
+                     where this program is, so turn it on from the release build, not from target\\debug.",
+                ))
+                .children(self.startup_status.clone().map(|status| div().text_sm().child(status)))
+            })
+            .children(folder.map(|folder| {
+                section("Settings")
+                    .child(div().text_sm().opacity(0.7).child(format!(
+                        "Save writes the dashboard to dashboard.json, and your themes are kept in themes.json, \
+                         both in {}",
+                        folder.display()
+                    )))
+                    .child(div().flex().child(Button::new("open-folder").label("Open settings folder").on_click(
+                        move |_, _, cx| {
+                            // Not there before the first save.
+                            if std::fs::create_dir_all(&folder).is_ok() {
+                                cx.open_with_system(&folder);
+                            }
+                        },
+                    )))
+            }))
     }
 
     fn shared_style_options(&self) -> Div {
@@ -847,6 +922,31 @@ impl DashboardView {
     }
 }
 
+/// Bahnschrift comes with Windows 10 and 11; elsewhere GPUI falls back to the default font.
+const BRAND_FONT: &str = "Bahnschrift";
+
+/// The app name in the header: the brand mark (a plain black circle), then "DESKLING" in bold
+/// capitals, spaced out a little. GPUI has no letter spacing, so each letter is its own element.
+fn brand() -> Div {
+    let mark = div().size(px(16.)).rounded_full().bg(black());
+    let letters = crate::APP_NAME.to_uppercase().chars().map(|letter| div().child(letter.to_string())).collect::<Vec<_>>();
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_3()
+        .child(mark)
+        .child(
+            div()
+                .flex()
+                .gap(px(2.))
+                .font_family(BRAND_FONT)
+                .font_weight(FontWeight::BOLD)
+                .text_xl()
+                .children(letters),
+        )
+}
+
 /// A titled group of options, with a line above it.
 fn section(title: &'static str) -> Div {
     div()
@@ -867,6 +967,7 @@ impl Render for DashboardView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let options = match self.selected {
             Selected::Widget(index) => self.widget_options(index, cx),
+            Selected::General => self.general_options(cx),
             Selected::SharedStyle => self.shared_style_options(),
             Selected::Themes => self.theme_options(cx),
             Selected::Layout => self.layout_options(cx),
@@ -880,37 +981,16 @@ impl Render for DashboardView {
             .py_3()
             .border_b_1()
             .border_color(black().opacity(0.1))
-            .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .gap_2()
-                    .child(div().text_xl().child(crate::APP_NAME))
-                    .child(div().text_sm().opacity(0.6).child("desktop widgets")),
-            )
-            .child(div().flex_1())
-            .children(self.save_status.clone().map(|status| div().text_xs().opacity(0.7).child(status)))
-            .when(cfg!(windows), |header| {
-                header.child(
-                    Switch::new("start-with-windows")
-                        .checked(self.starts_with_windows)
-                        .label("Start with Windows")
-                        .on_click(cx.listener(|this, enabled: &bool, _, cx| {
-                            this.set_starts_with_windows(*enabled);
-                            cx.notify();
-                        })),
-                )
-            })
+            .child(brand())
+            // Takes the free space; a long message is cut off with "…" instead of pushing the
+            // buttons past the window edge.
+            .child(div().flex_1().min_w_0().flex().justify_end().children(
+                self.save_status.clone().map(|status| div().truncate().text_sm().opacity(0.7).child(status)),
+            ))
             .when(self.has_tray, |header| {
                 header.child(Button::new("quit").label("Quit").on_click(|_, _, cx| cx.quit()))
             })
-            .child(Button::new("save").primary().label("Save").on_click(cx.listener(|this, _, _, cx| {
-                this.save_status = Some(match this.dashboard.save(cx) {
-                    Ok(path) => format!("Saved to {}", path.display()).into(),
-                    Err(error) => format!("Could not save: {error}").into(),
-                });
-                cx.notify();
-            })));
+            .child(Button::new("save").primary().label("Save").on_click(cx.listener(|this, _, _, cx| this.save(cx))));
 
         div()
             .size_full()

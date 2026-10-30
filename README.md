@@ -123,7 +123,7 @@ style still needs **Save**). Theme files are plain JSON with colors as `#rrggbba
 Fields left out get the Classic value. A file with a single theme object, or a plain list of
 themes, imports too.
 
-**Start with Windows** (in the dashboard header) adds the app to your sign-in programs (the
+**Start with Windows** (on the **General** page, under Settings) adds the app to your sign-in programs (the
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key), started with `--hidden`.
 It records the path of the program you're running now, so use it from a release build
 (`cargo build --release`, then run `target\release\deskling.exe`): `cargo clean` or moving

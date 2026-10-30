@@ -219,9 +219,14 @@ fn config_base() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
 }
 
+/// `%APPDATA%\Deskling` on Windows (`~/.config/Deskling` elsewhere).
+pub fn settings_folder() -> Option<PathBuf> {
+    Some(config_base()?.join(crate::APP_NAME))
+}
+
 /// `%APPDATA%\Deskling\<name>` on Windows (`~/.config/Deskling/<name>` elsewhere).
 fn config_file(name: &str) -> Option<PathBuf> {
-    Some(config_base()?.join(crate::APP_NAME).join(name))
+    Some(settings_folder()?.join(name))
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
