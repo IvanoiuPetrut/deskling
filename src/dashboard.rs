@@ -224,13 +224,23 @@ fn config_file(name: &str) -> Option<PathBuf> {
     Some(config_base()?.join(crate::APP_NAME).join(name))
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
+pub fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
     let new_path = config_file(name)?;
     let path = if new_path.exists() { new_path } else { config_base()?.join(OLD_FOLDER).join(name) };
     let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&text)
         .inspect_err(|error| log::warn!("Ignoring {}: {error}", path.display()))
         .ok()
+}
+
+/// Writes `value` to the settings folder as `name` and returns where it went.
+pub fn write_json<T: Serialize>(name: &str, value: &T) -> std::io::Result<PathBuf> {
+    let path = config_file(name).ok_or(std::io::ErrorKind::NotFound)?;
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(value)?)?;
+    Ok(path)
 }
 
 impl Dashboard {
@@ -295,12 +305,6 @@ impl Dashboard {
             snap_to_grid: self.snap_to_grid,
             grid_size: self.grid_size,
         };
-
-        let path = config_file("dashboard.json").ok_or(std::io::ErrorKind::NotFound)?;
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        std::fs::write(&path, serde_json::to_string_pretty(&file)?)?;
-        Ok(path)
+        write_json("dashboard.json", &file)
     }
 }

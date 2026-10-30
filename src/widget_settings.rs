@@ -1,11 +1,15 @@
+use gpui_kit::component::button::Button;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::theme::{Theme, ThemeLibrary};
 use crate::widget::{BorderKind, WidgetStyle};
 
 /// First entry of the font list; picking it means "the default font" (an empty `font_family`).
@@ -21,11 +25,16 @@ struct NumberSetting {
     get: fn(&WidgetStyle) -> f32,
 }
 
-/// The style editor in the dashboard (sliders, border type, colors) for one `WidgetStyle`:
+/// The style editor in the dashboard (theme, sliders, border type, colors) for one `WidgetStyle`:
 /// the shared style or one widget's own. Every change is written straight into it, and the
 /// widgets using it redraw themselves.
 pub struct WidgetSettings {
     style: Entity<WidgetStyle>,
+    themes: Entity<ThemeLibrary>,
+    /// Name for "Save as theme".
+    theme_name: Entity<InputState>,
+    /// Result of the last "Save as theme" click.
+    theme_status: Option<SharedString>,
     numbers: Vec<NumberSetting>,
     text_color: Entity<ColorPickerState>,
     background: Entity<ColorPickerState>,
@@ -38,8 +47,14 @@ pub struct WidgetSettings {
 }
 
 impl WidgetSettings {
-    pub fn new(style: Entity<WidgetStyle>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut subs = Vec::new();
+    pub fn new(
+        style: Entity<WidgetStyle>,
+        themes: Entity<ThemeLibrary>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Redraw the theme list when themes are added, imported or deleted.
+        let mut subs = vec![cx.observe(&themes, |_, _, cx| cx.notify())];
 
         #[rustfmt::skip]
         let numbers = vec![
@@ -63,9 +78,13 @@ impl WidgetSettings {
         let warning_color = Self::color(&style, current.warning_color, |s, c| s.warning_color = c, &mut subs, window, cx);
         let critical_color = Self::color(&style, current.critical_color, |s, c| s.critical_color = c, &mut subs, window, cx);
         let font = Self::font_picker(&style, &current.font_family, &mut subs, window, cx);
+        let theme_name = cx.new(|cx| InputState::new(window, cx).placeholder("Theme name"));
 
         Self {
             style,
+            themes,
+            theme_name,
+            theme_status: None,
             numbers,
             text_color,
             background,
@@ -76,6 +95,118 @@ impl WidgetSettings {
             font,
             _subscriptions: subs,
         }
+    }
+
+    /// Gives the style `theme`'s look, and moves the sliders and pickers to match.
+    pub fn apply_theme(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) {
+        self.style.update(cx, |style, cx| {
+            theme.apply(style);
+            cx.notify();
+        });
+        self.theme_status = None;
+
+        // `set_value` doesn't fire change events, so this doesn't write back into the style.
+        let style = self.style.read(cx).clone();
+        for number in &self.numbers {
+            let value = (number.get)(&style);
+            number.slider.update(cx, |slider, cx| slider.set_value(value, window, cx));
+        }
+        let colors = [
+            (&self.text_color, style.text_color),
+            (&self.background, style.background),
+            (&self.border_color, style.border_color),
+            (&self.accent_color, style.accent_color),
+            (&self.warning_color, style.warning_color),
+            (&self.critical_color, style.critical_color),
+        ];
+        for (picker, color) in colors {
+            picker.update(cx, |picker, cx| picker.set_value(color, window, cx));
+        }
+        let font: SharedString =
+            if style.font_family.is_empty() { DEFAULT_FONT.into() } else { style.font_family.into() };
+        self.font.update(cx, |picker, cx| picker.set_selected_value(&font, window, cx));
+        cx.notify();
+    }
+
+    /// Saves the current look as a theme under the typed name.
+    fn save_as_theme(&mut self, cx: &mut Context<Self>) {
+        let name = self.theme_name.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            self.theme_status = Some("Type a name for the theme first.".into());
+            cx.notify();
+            return;
+        }
+        let theme = Theme::from_style(&name, self.style.read(cx));
+        let saved = self.themes.update(cx, |themes, cx| {
+            let saved = themes.save_theme(theme);
+            cx.notify();
+            saved
+        });
+        self.theme_status = Some(match saved {
+            Ok(name) => format!("Saved as theme \"{name}\".").into(),
+            Err(error) => format!("Could not save the theme: {error}").into(),
+        });
+        cx.notify();
+    }
+
+    /// One button per theme (the one in use is highlighted), then "Save as theme".
+    fn theme_picker(&self, style: &WidgetStyle, cx: &mut Context<Self>) -> Div {
+        let themes: Vec<Theme> = self.themes.read(cx).all().map(|(theme, _)| theme.clone()).collect();
+        let chips = themes.into_iter().enumerate().map(|(index, theme)| {
+            let active = theme.matches(style);
+            let swatch = div()
+                .size(px(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(black().opacity(0.2))
+                .bg(theme.background)
+                .child(div().size(px(6.)).rounded_full().bg(theme.accent_color));
+            div()
+                .id(("theme", index))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(black().opacity(if active { 0.5 } else { 0.1 }))
+                .when(active, |chip| chip.bg(black().opacity(0.07)))
+                .hover(|chip| chip.bg(black().opacity(0.04)))
+                .cursor_pointer()
+                .text_sm()
+                .child(swatch)
+                .child(theme.name.clone())
+                .on_click(cx.listener(move |this, _, window, cx| this.apply_theme(&theme, window, cx)))
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child("Theme")
+            .child(div().flex().flex_wrap().gap_2().children(chips))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.theme_name)))
+                    .child(
+                        Button::new("save-theme")
+                            .label("Save as theme")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_as_theme(cx))),
+                    ),
+            )
+            .children(self.theme_status.clone().map(|status| div().text_sm().opacity(0.7).child(status)))
+            .child(div().text_sm().opacity(0.7).child(
+                "A theme sets colors, border, corners, glass and font, not the size. Saving under the \
+                 name of one of your own themes updates it.",
+            ))
     }
 
     /// Makes a slider that edits one number in the style.
@@ -171,6 +302,7 @@ impl Render for WidgetSettings {
             .flex_col()
             .gap_4()
             .w_full()
+            .child(self.theme_picker(&style, cx))
             .child(div().flex().flex_col().gap_1().child("Font").child(Select::new(&self.font)))
             .children(self.numbers.iter().map(|number| {
                 div()

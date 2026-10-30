@@ -1,6 +1,6 @@
 //! The main window: the list of desktop widgets on the left, the selected one's options on the right.
 
-use gpui_kit::component::Sizable;
+use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -12,6 +12,7 @@ use gpui_kit::*;
 
 use crate::dashboard::{Dashboard, DateFormat, WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
+use crate::theme::{self, Theme, ThemeLibrary};
 use crate::widget;
 use crate::widget_settings::WidgetSettings;
 use crate::widgets::{gigabytes, utc_name, widget_type};
@@ -21,6 +22,7 @@ use crate::widgets::{gigabytes, utc_name, widget_type};
 enum Selected {
     Widget(usize),
     SharedStyle,
+    Themes,
     Layout,
 }
 
@@ -36,12 +38,18 @@ struct WidgetPanel {
 }
 
 impl WidgetPanel {
-    fn new(config: &Entity<WidgetConfig>, window: &mut Window, cx: &mut Context<DashboardView>) -> Self {
+    fn new(
+        config: &Entity<WidgetConfig>,
+        themes: &Entity<ThemeLibrary>,
+        window: &mut Window,
+        cx: &mut Context<DashboardView>,
+    ) -> Self {
         let current = config.read(cx);
         let (style, label_text, thresholds, clock) =
             (current.style.clone(), current.parts.label.clone(), current.thresholds, current.clock);
 
-        let style = cx.new(|cx| WidgetSettings::new(style, window, cx));
+        let themes = themes.clone();
+        let style = cx.new(|cx| WidgetSettings::new(style, themes, window, cx));
         let label = cx.new(|cx| InputState::new(window, cx).placeholder("Automatic").default_value(label_text));
         let slider = |min: f32, max: f32, step: f32, value: f32, cx: &mut Context<DashboardView>| {
             cx.new(|_| SliderState::new().min(min).max(max).step(step).default_value(value))
@@ -99,6 +107,12 @@ pub struct DashboardView {
     /// Each widget's options page state, in the same order as `dashboard.widgets`.
     widget_panels: Vec<WidgetPanel>,
     grid_size: Entity<SliderState>,
+    /// The built-in and the user's themes, shared with every style editor.
+    themes: Entity<ThemeLibrary>,
+    /// Result of the last import / export / delete on the Themes page.
+    theme_status: Option<SharedString>,
+    /// The theme whose "Delete" was clicked once; a second click deletes it.
+    confirm_delete: Option<String>,
     /// Result of the last "Save" (or "Start with Windows") click.
     save_status: Option<SharedString>,
     /// With a tray icon, closing the dashboard only hides it; without one, it quits the app.
@@ -115,9 +129,11 @@ impl DashboardView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let themes = cx.new(|_| ThemeLibrary::load());
         let shared_style = dashboard.shared_style.clone();
-        let shared_panel = cx.new(|cx| WidgetSettings::new(shared_style, window, cx));
-        let widget_panels = dashboard.widgets.iter().map(|config| WidgetPanel::new(config, window, cx)).collect();
+        let shared_panel = cx.new(|cx| WidgetSettings::new(shared_style, themes.clone(), window, cx));
+        let widget_panels =
+            dashboard.widgets.iter().map(|config| WidgetPanel::new(config, &themes, window, cx)).collect();
         let grid_size =
             cx.new(|_| SliderState::new().min(5.).max(100.).step(5.).default_value(dashboard.grid_size));
 
@@ -172,6 +188,9 @@ impl DashboardView {
             shared_panel,
             widget_panels,
             grid_size,
+            themes,
+            theme_status: None,
+            confirm_delete: None,
             save_status: None,
             has_tray,
             #[cfg(windows)]
@@ -187,7 +206,7 @@ impl DashboardView {
     fn selected_kind(&self, cx: &App) -> Option<WidgetKind> {
         match self.selected {
             Selected::Widget(index) => Some(self.dashboard.widgets[index].read(cx).kind),
-            Selected::SharedStyle | Selected::Layout => None,
+            Selected::SharedStyle | Selected::Themes | Selected::Layout => None,
         }
     }
 
@@ -223,7 +242,7 @@ impl DashboardView {
     /// Adds a new widget of `kind`, shows it on the desktop and opens its options.
     fn add_widget(&mut self, kind: WidgetKind, window: &mut Window, cx: &mut Context<Self>) {
         let config = self.dashboard.add(kind, cx);
-        self.widget_panels.push(WidgetPanel::new(&config, window, cx));
+        self.widget_panels.push(WidgetPanel::new(&config, &self.themes, window, cx));
         self.windows.push(None);
         let index = self.dashboard.widgets.len() - 1;
         self.set_shown(index, true, cx);
@@ -325,6 +344,7 @@ impl DashboardView {
             })))
             .child(heading("Settings"))
             .child(self.list_item("shared-style", "Shared style", Selected::SharedStyle, cx))
+            .child(self.list_item("themes", "Themes", Selected::Themes, cx))
             .child(self.list_item("layout", "Layout", Selected::Layout, cx))
     }
 
@@ -609,6 +629,222 @@ impl DashboardView {
             .child(div().opacity(0.7).child("Used by every widget that has \"Use shared style\" on."))
             .child(self.shared_panel.clone())
     }
+
+    /// Gives the shared style `theme`'s look, and with `everywhere` also every widget's own style.
+    fn use_theme(&mut self, theme: &Theme, everywhere: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.shared_panel.update(cx, |panel, cx| panel.apply_theme(theme, window, cx));
+        if everywhere {
+            for panel in &self.widget_panels {
+                panel.style.update(cx, |panel, cx| panel.apply_theme(theme, window, cx));
+            }
+        }
+        self.theme_status = Some(match everywhere {
+            true => format!("\"{}\" is now used by every widget.", theme.name).into(),
+            false => format!("\"{}\" is now the shared style.", theme.name).into(),
+        });
+        cx.notify();
+    }
+
+    /// "Use everywhere" also replaces widgets' own styles, so ask first.
+    fn confirm_use_everywhere(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) {
+        let own_styles = self.dashboard.widgets.iter().filter(|config| !config.read(cx).use_shared_style).count();
+        let detail = match own_styles {
+            0 => "Every widget uses the shared style right now, so only the shared style changes.".to_string(),
+            1 => "This also replaces the look of the 1 widget that has its own style.".to_string(),
+            count => format!("This also replaces the look of the {count} widgets that have their own style."),
+        };
+        let detail = format!("{detail} Sizes, padding and font sizes stay. Nothing is kept until you click Save.");
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Use \"{}\" for every widget?", theme.name),
+            Some(&detail),
+            &[PromptButton::Ok("Use everywhere".into()), PromptButton::Cancel("Cancel".into())],
+            cx,
+        );
+        let theme = theme.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update_in(cx, |this, window, cx| this.use_theme(&theme, true, window, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Asks for theme files and adds the themes in them.
+    fn import_themes(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Import themes".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            this.update(cx, |this, cx| {
+                let mut added = 0;
+                let mut problems = Vec::new();
+                for path in paths {
+                    match this.themes.update(cx, |themes, cx| {
+                        let imported = themes.import(&path);
+                        cx.notify();
+                        imported
+                    }) {
+                        Ok(count) => added += count,
+                        Err(error) => problems.push(format!(
+                            "{}: {error}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        )),
+                    }
+                }
+                let mut status = match added {
+                    0 => "No new themes found.".to_string(),
+                    1 => "Imported 1 theme.".to_string(),
+                    count => format!("Imported {count} themes."),
+                };
+                if !problems.is_empty() {
+                    status = format!("{status} Skipped {}", problems.join("; "));
+                }
+                this.theme_status = Some(status.into());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks where to save, then writes `themes` there as one file.
+    fn export_themes(&mut self, themes: Vec<Theme>, suggested_name: String, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_new_path(&theme::dialog_folder(), Some(&suggested_name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = picked.await else { return };
+            let result = theme::export(themes, &path);
+            this.update(cx, |this, cx| {
+                this.theme_status = Some(match result {
+                    Ok(()) => format!("Exported to {}", path.display()).into(),
+                    Err(error) => format!("Could not export: {error}").into(),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn delete_theme(&mut self, name: &str, cx: &mut Context<Self>) {
+        let removed = self.themes.update(cx, |themes, cx| {
+            let removed = themes.remove(name);
+            cx.notify();
+            removed
+        });
+        self.confirm_delete = None;
+        self.theme_status = Some(match removed {
+            Ok(()) => format!("Deleted \"{name}\".").into(),
+            Err(error) => format!("Could not delete: {error}").into(),
+        });
+        cx.notify();
+    }
+
+    fn theme_options(&self, cx: &mut Context<Self>) -> Div {
+        let library = self.themes.read(cx);
+        let themes: Vec<(Theme, bool)> = library.all().map(|(theme, built_in)| (theme.clone(), built_in)).collect();
+        let custom = library.custom.clone();
+
+        let cards = themes.into_iter().enumerate().map(|(index, (theme, built_in))| {
+            let confirming = self.confirm_delete.as_deref() == Some(theme.name.as_str());
+            let name = theme.name.clone();
+            let (shared, everywhere, exported, deleted) = (theme.clone(), theme.clone(), theme.clone(), theme.name.clone());
+            div()
+                .w(px(208.))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(black().opacity(0.1))
+                .child(theme::preview(&theme, 182., 96.))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .justify_between()
+                        .gap_2()
+                        .child(div().overflow_hidden().text_ellipsis().child(name))
+                        .child(div().text_xs().opacity(0.6).child(if built_in { "Built-in" } else { "Yours" })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(Button::new(("use-shared", index)).small().label("Use as shared").on_click(
+                            cx.listener(move |this, _, window, cx| this.use_theme(&shared, false, window, cx)),
+                        ))
+                        .child(Button::new(("use-all", index)).small().label("Use everywhere").on_click(
+                            cx.listener(move |this, _, window, cx| this.confirm_use_everywhere(&everywhere, window, cx)),
+                        ))
+                        .child(Button::new(("export", index)).small().label("Export…").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                let file_name = theme::file_name(&exported.name);
+                                this.export_themes(vec![exported.clone()], file_name, cx);
+                            },
+                        )))
+                        .when(!built_in, |buttons| {
+                            buttons.child(
+                                Button::new(("delete", index))
+                                    .small()
+                                    .when(confirming, |button| button.danger())
+                                    .label(if confirming { "Really delete?" } else { "Delete" })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.confirm_delete.as_deref() == Some(deleted.as_str()) {
+                                            this.delete_theme(&deleted, cx);
+                                        } else {
+                                            this.confirm_delete = Some(deleted.clone());
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                        }),
+                )
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(div().text_xl().child("Themes"))
+            .child(div().opacity(0.7).child(
+                "A theme is a look: colors, border, corners, glass and font. To make your own, style the \
+                 shared style (or a widget) the way you like and use \"Save as theme\" at the top of its \
+                 style options. Theme changes are saved right away.",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(Button::new("import-themes").label("Import…").on_click(
+                        cx.listener(|this, _, _, cx| this.import_themes(cx)),
+                    ))
+                    .child(
+                        Button::new("export-mine")
+                            .label("Export my themes…")
+                            .disabled(custom.is_empty())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let file_name = format!("{} themes.json", crate::APP_NAME);
+                                this.export_themes(custom.clone(), file_name, cx);
+                            })),
+                    )
+                    .child(Button::new("new-theme").label("New theme from shared style").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.selected = Selected::SharedStyle;
+                            cx.notify();
+                        },
+                    ))),
+            )
+            .children(self.theme_status.clone().map(|status| div().text_sm().opacity(0.7).child(status)))
+            .child(div().flex().flex_wrap().gap_3().children(cards))
+    }
 }
 
 /// A titled group of options, with a line above it.
@@ -632,6 +868,7 @@ impl Render for DashboardView {
         let options = match self.selected {
             Selected::Widget(index) => self.widget_options(index, cx),
             Selected::SharedStyle => self.shared_style_options(),
+            Selected::Themes => self.theme_options(cx),
             Selected::Layout => self.layout_options(cx),
         };
 

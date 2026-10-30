@@ -8,6 +8,7 @@ mod dashboard;
 mod dashboard_view;
 mod glass;
 mod stats;
+mod theme;
 #[cfg(windows)]
 mod tray;
 mod widget;

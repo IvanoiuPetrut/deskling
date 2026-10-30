@@ -50,7 +50,8 @@ src/
 ├── stats.rs            reads CPU, RAM, disk, network and temperature once a second, keeps history
 ├── tray.rs             tray icon, hiding/showing the dashboard, "Start with Windows" (Windows only)
 ├── widget.rs           the desktop widget window, its WidgetStyle, graphs, and the Windows pinning code
-├── widget_settings.rs  the style editor: sliders, border type and color pickers
+├── widget_settings.rs  the style editor: theme picker, sliders, border type and color pickers
+├── theme.rs            built-in themes, the user's themes (themes.json), import/export, previews
 ├── glass.rs            the glass effect: crops and blurs a picture of the desktop behind a widget
 └── widgets/            one file per widget type, each implementing the `WidgetType` trait
     ├── mod.rs          the trait and the kind → type lookup
@@ -89,6 +90,38 @@ Each widget either uses the **Shared style** (default) or, with **Use shared sty
 its own style. A style covers size, padding, corner radius, font (any installed font, weight,
 size, and the label's size), background opacity, border (none / solid / dashed) and width, glass
 blur, and the colors: text, background, border, bars & graphs, warning and critical.
+
+### Themes
+
+A **theme** is a named look: colors, background opacity, border, corner radius, glass blur and
+font. Applying one leaves the size, padding and font size alone, so it never breaks a layout.
+
+- **Pick a theme** at the top of any style editor (shared style or a widget's own). The theme in
+  use is highlighted. The app comes with Classic, Frosted glass, Light, Midnight, Nord,
+  Solarized, Terminal, Neon, Sunset and Minimal.
+- **Make your own**: style it the way you like, type a name and click **Save as theme**. Saving
+  under the name of one of your themes updates it.
+- The **Themes** page (under Settings) shows a preview of every theme, with **Use as shared**,
+  **Use everywhere** (the shared style and every widget's own style), **Export…** and, for your
+  own themes, **Delete** (click twice).
+- **Import…** reads one or more theme files; **Export my themes…** writes all of yours to one
+  file. A theme already there isn't added twice, and a name that's taken gets a number added.
+
+Your themes are saved right away to `%APPDATA%\Deskling\themes.json` (applying a theme to a
+style still needs **Save**). Theme files are plain JSON with colors as `#rrggbbaa`:
+
+```json
+{
+  "app": "Deskling",
+  "themes": [
+    { "name": "Mine", "text_color": "#ffffffff", "background": "#102030ff", "opacity": 0.8,
+      "border": "Solid", "border_color": "#ffffff55", "corner_radius": 12.0, "accent_color": "#4cc9f0ff" }
+  ]
+}
+```
+
+Fields left out get the Classic value. A file with a single theme object, or a plain list of
+themes, imports too.
 
 **Start with Windows** (in the dashboard header) adds the app to your sign-in programs (the
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key), started with `--hidden`.
