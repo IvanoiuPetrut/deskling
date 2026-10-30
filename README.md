@@ -1,6 +1,6 @@
-# gpui-hello
+# Deskling
 
-A small [GPUI](https://www.gpui.rs/) app for learning Rust: desktop widgets (clock, CPU, RAM, disk
+Desktop widgets for Windows, written in Rust with [GPUI](https://www.gpui.rs/) while learning both: (clock, CPU, RAM, disk
 space, network), similar to Rainmeter skins, with a dashboard window to add, remove and style them,
 and a tray icon.
 
@@ -36,7 +36,7 @@ cargo run -- --hidden
 |---|---|
 | `cargo run` | Build (debug) and start the app |
 | `cargo check` | Only check that the code compiles; faster than a full build |
-| `cargo build` | Build without starting; the program lands in `target/debug/gpui-hello.exe` |
+| `cargo build` | Build without starting; the program lands in `target/debug/deskling.exe` |
 | `cargo run --release` | Optimized build: slower to compile, faster to run |
 
 ## Project layout
@@ -93,12 +93,13 @@ blur, and the colors: text, background, border, bars & graphs, warning and criti
 **Start with Windows** (in the dashboard header) adds the app to your sign-in programs (the
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key), started with `--hidden`.
 It records the path of the program you're running now, so use it from a release build
-(`cargo build --release`, then run `target\release\gpui-hello.exe`): `cargo clean` or moving
+(`cargo build --release`, then run `target\release\deskling.exe`): `cargo clean` or moving
 the project would break a path into `target\debug`.
 
 **Save** writes everything (which widgets are shown, their options, styles and positions) to
-`%APPDATA%\gpui-hello\dashboard.json`, and the app loads it on the next start. Delete that file to
-go back to the defaults. A `widget-style.json` from an older version is picked up as the shared style.
+`%APPDATA%\Deskling\dashboard.json`, and the app loads it on the next start. Delete that file to
+go back to the defaults. Settings saved before the rename (in `%APPDATA%\gpui-hello`) are still picked up until you
+save, and a `widget-style.json` from an older version becomes the shared style.
 
 ## The desktop widgets
 

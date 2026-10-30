@@ -54,14 +54,14 @@ impl Tray {
             let class = WNDCLASSW {
                 lpfnWndProc: Some(tray_window_proc),
                 hInstance: instance.into(),
-                lpszClassName: w!("GpuiHelloTray"),
+                lpszClassName: w!("DesklingTray"),
                 ..Default::default()
             };
             RegisterClassW(&class);
             // A message-only window: never visible, it only receives the icon's messages.
             let window = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
-                w!("GpuiHelloTray"),
+                w!("DesklingTray"),
                 w!(""),
                 WINDOW_STYLE(0),
                 0,
@@ -79,7 +79,7 @@ impl Tray {
             icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             icon.uCallbackMessage = TRAY_MESSAGE;
             icon.hIcon = LoadIconW(None, IDI_APPLICATION).ok()?;
-            let tip: Vec<u16> = "Desktop widgets".encode_utf16().collect();
+            let tip: Vec<u16> = crate::APP_NAME.encode_utf16().collect();
             icon.szTip[..tip.len()].copy_from_slice(&tip);
             Shell_NotifyIconW(NIM_ADD, &icon).ok().ok()?;
 
@@ -164,7 +164,7 @@ pub fn set_window_visible(raw_hwnd: isize, visible: bool) {
 
 // "Start with Windows" = a value under this registry key, holding the command to run at sign-in.
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
-const RUN_VALUE: PCWSTR = w!("GpuiHelloWidgets");
+const RUN_VALUE: PCWSTR = w!("Deskling");
 
 pub fn starts_with_windows() -> bool {
     unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, None, None).is_ok() }

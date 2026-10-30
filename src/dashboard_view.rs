@@ -643,7 +643,14 @@ impl Render for DashboardView {
             .py_3()
             .border_b_1()
             .border_color(black().opacity(0.1))
-            .child(div().text_xl().child("Desktop widgets"))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .child(div().text_xl().child(crate::APP_NAME))
+                    .child(div().text_sm().opacity(0.6).child("desktop widgets")),
+            )
             .child(div().flex_1())
             .children(self.save_status.clone().map(|status| div().text_xs().opacity(0.7).child(status)))
             .when(cfg!(windows), |header| {

@@ -13,6 +13,9 @@ mod widgets;
 use dashboard::Dashboard;
 use dashboard_view::DashboardView;
 
+/// Shown in the window title, the dashboard header and the tray icon, and used for the settings folder.
+pub const APP_NAME: &str = "Deskling";
+
 fn main() {
     env_logger::init();
     // `--hidden` (used by "Start with Windows"): start with only the widgets and the tray icon.
@@ -35,7 +38,7 @@ fn main() {
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some("Desktop widgets".into()), ..Default::default() }),
+            titlebar: Some(TitlebarOptions { title: Some(APP_NAME.into()), ..Default::default() }),
             // Without a tray icon there'd be no way to bring a hidden dashboard back.
             show: !(hidden && has_tray),
             ..Default::default()

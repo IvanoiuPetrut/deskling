@@ -208,16 +208,25 @@ impl WidgetFile {
     }
 }
 
-/// `%APPDATA%\gpui-hello\<name>` on Windows (`~/.config/gpui-hello/<name>` elsewhere).
-fn config_file(name: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA")
+/// The settings folder from before the app was renamed to Deskling; still read if nothing's
+/// been saved under the new name yet, so existing setups carry over.
+const OLD_FOLDER: &str = "gpui-hello";
+
+/// `%APPDATA%` on Windows (`~/.config` elsewhere).
+fn config_base() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("gpui-hello").join(name))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+}
+
+/// `%APPDATA%\Deskling\<name>` on Windows (`~/.config/Deskling/<name>` elsewhere).
+fn config_file(name: &str) -> Option<PathBuf> {
+    Some(config_base()?.join(crate::APP_NAME).join(name))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
-    let path = config_file(name)?;
+    let new_path = config_file(name)?;
+    let path = if new_path.exists() { new_path } else { config_base()?.join(OLD_FOLDER).join(name) };
     let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&text)
         .inspect_err(|error| log::warn!("Ignoring {}: {error}", path.display()))
