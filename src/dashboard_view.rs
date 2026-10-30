@@ -926,25 +926,47 @@ impl DashboardView {
 const BRAND_FONT: &str = "Bahnschrift";
 
 /// The app name in the header: the brand mark (a plain black circle), then "DESKLING" in bold
-/// capitals, spaced out a little. GPUI has no letter spacing, so each letter is its own element.
+/// capitals, spaced out a little.
 fn brand() -> Div {
     let mark = div().size(px(16.)).rounded_full().bg(black());
-    let letters = crate::APP_NAME.to_uppercase().chars().map(|letter| div().child(letter.to_string())).collect::<Vec<_>>();
     div()
         .flex()
         .flex_none()
         .items_center()
         .gap_3()
         .child(mark)
-        .child(
-            div()
-                .flex()
-                .gap(px(2.))
-                .font_family(BRAND_FONT)
-                .font_weight(FontWeight::BOLD)
-                .text_xl()
-                .children(letters),
-        )
+        .child(spaced_letters(&crate::APP_NAME.to_uppercase(), 2.).text_xl())
+}
+
+/// "DESKTOP WIDGETS" in big, faint letters behind the header, starting just left of the name.
+/// The header clips it, and it's drawn first so everything else sits on top.
+fn watermark() -> Div {
+    div()
+        .absolute()
+        .left(px(12.))
+        .top_0()
+        .bottom_0()
+        .flex()
+        .items_center()
+        .text_color(black().opacity(0.05))
+        .child(spaced_letters("DESKTOP WIDGETS", 4.).text_size(px(40.)))
+}
+
+/// `text` in the brand font, bold, with `gap` pixels between letters (GPUI has no letter
+/// spacing, so each letter is its own element; a space becomes a fixed gap).
+fn spaced_letters(text: &str, gap: f32) -> Div {
+    let letters = text.chars().map(|letter| match letter {
+        ' ' => div().w(px(gap * 3.)),
+        letter => div().child(letter.to_string()),
+    });
+    div()
+        .flex()
+        .flex_none()
+        .gap(px(gap))
+        .whitespace_nowrap()
+        .font_family(BRAND_FONT)
+        .font_weight(FontWeight::BOLD)
+        .children(letters.collect::<Vec<_>>())
 }
 
 /// A titled group of options, with a line above it.
@@ -974,6 +996,8 @@ impl Render for DashboardView {
         };
 
         let header = div()
+            .relative()
+            .overflow_hidden()
             .flex()
             .items_center()
             .gap_4()
@@ -981,6 +1005,7 @@ impl Render for DashboardView {
             .py_3()
             .border_b_1()
             .border_color(black().opacity(0.1))
+            .child(watermark())
             .child(brand())
             // Takes the free space; a long message is cut off with "…" instead of pushing the
             // buttons past the window edge.
