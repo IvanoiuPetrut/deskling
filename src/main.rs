@@ -1,3 +1,7 @@
+// Release builds are window programs: Windows opens no console window next to the app.
+// Debug builds stay console programs, so logs still show while developing.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use gpui_kit::*;
 
 mod dashboard;
