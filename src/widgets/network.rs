@@ -28,6 +28,7 @@ impl WidgetType for Network {
             value: format!("↓ {}", speed(stats.net_down)),
             bar: None,
             graph: Some(Graph { points: downloads, max }),
+            rows: Vec::new(),
         }
     }
 

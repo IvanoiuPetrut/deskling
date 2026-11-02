@@ -12,7 +12,7 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::dashboard::{Dashboard, DateFormat, WidgetConfig, WidgetKind};
+use crate::dashboard::{BatteryOptions, Dashboard, DateFormat, WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
 use crate::theme::{self, Theme, ThemeLibrary};
 use crate::widget;
@@ -36,6 +36,9 @@ struct WidgetPanel {
     warning: Entity<SliderState>,
     critical: Entity<SliderState>,
     utc_offset: Entity<SliderState>,
+    /// Batteries widget: a name box per device, by the device's Windows name. Added as devices
+    /// show up (see `DashboardView::add_battery_name_boxes`).
+    battery_names: Vec<(String, Entity<InputState>)>,
     // Dropped together with the panel when the widget is removed.
     _subscriptions: Vec<Subscription>,
 }
@@ -77,7 +80,7 @@ impl WidgetPanel {
             Self::on_slide(&utc_offset, config, |config, value| config.clock.utc_offset = Some(value), cx),
         ];
 
-        Self { style, label, warning, critical, utc_offset, _subscriptions: subscriptions }
+        Self { style, label, warning, critical, utc_offset, battery_names: Vec::new(), _subscriptions: subscriptions }
     }
 
     /// Writes a slider's value into the widget's config whenever it moves.
@@ -143,10 +146,11 @@ impl DashboardView {
             cx.new(|_| SliderState::new().min(5.).max(100.).step(5.).default_value(dashboard.grid_size));
 
         let subscriptions = vec![
-            // The Disk widget's drive list comes from the stats, so redraw when they change
-            // (only while that widget is open on the right, to avoid redrawing every second).
+            // The Disk widget's drive list and the Batteries widget's device list come from the
+            // stats, so redraw when they change (only while such a widget is open on the right,
+            // to avoid redrawing every second).
             cx.observe(&stats, |this: &mut Self, _, cx| {
-                if this.selected_kind(cx) == Some(WidgetKind::Disk) {
+                if matches!(this.selected_kind(cx), Some(WidgetKind::Disk | WidgetKind::Battery)) {
                     cx.notify();
                 }
             }),
@@ -377,10 +381,12 @@ impl DashboardView {
         let (enabled, use_shared_style, locked) = (config.enabled, config.use_shared_style, config.locked);
         let (show_temperature, show_graph, disk) = (config.show_temperature, config.show_graph, config.disk.clone());
         let (parts, thresholds, clock) = (config.parts.clone(), config.thresholds, config.clock);
+        let battery = config.battery.clone();
         let panel = &self.widget_panels[index];
         let has_graph = widget_type(kind).has_graph();
-        // Widgets with a usage % (shown as their bar) can be colored by it.
-        let has_usage = matches!(kind, WidgetKind::Cpu | WidgetKind::Ram | WidgetKind::Disk);
+        // Widgets with a usage % (shown as their bar) can be colored by it. Batteries warn when low.
+        let has_usage = matches!(kind, WidgetKind::Cpu | WidgetKind::Ram | WidgetKind::Disk | WidgetKind::Battery);
+        let low = widget_type(kind).warns_when_low();
 
         // --- Content ---
         let content = section("Content")
@@ -466,25 +472,27 @@ impl DashboardView {
                 })
         });
 
+        // --- Batteries ---
+        let battery_options = (kind == WidgetKind::Battery).then(|| self.battery_devices(index, &battery, cx));
+
         // --- Color by usage ---
         let usage_colors = has_usage.then(|| {
-            section("Color by usage")
-                .child(self.checkbox(
-                    "thresholds",
-                    "Change color when usage is high",
-                    thresholds.enabled,
-                    index,
-                    |c, v| c.thresholds.enabled = v,
-                    cx,
-                ))
+            let (title, check, limit) = match low {
+                true => ("Low battery", "Change color when a battery runs low", "% or less"),
+                false => ("Color by usage", "Change color when usage is high", "% and up"),
+            };
+            let note = match low {
+                true => "Recolors the level and bar. The colors are \"Warning\" and \"Critical\" in the style.",
+                false => "Recolors the value, bar and graph. The colors are \"Warning\" and \"Critical\" \
+                          in the style. For disks this is the used space.",
+            };
+            section(title)
+                .child(self.checkbox("thresholds", check, thresholds.enabled, index, |c, v| c.thresholds.enabled = v, cx))
                 .when(thresholds.enabled, |colors| {
                     colors
-                        .child(labeled_slider(format!("Warning from {:.0}%", thresholds.warning), &panel.warning))
-                        .child(labeled_slider(format!("Critical from {:.0}%", thresholds.critical), &panel.critical))
-                        .child(div().text_sm().opacity(0.7).child(
-                            "Recolors the value, bar and graph. The colors are \"Warning\" and \"Critical\" \
-                             in the style. For disks this is the used space.",
-                        ))
+                        .child(labeled_slider(format!("Warning at {:.0}{limit}", thresholds.warning), &panel.warning))
+                        .child(labeled_slider(format!("Critical at {:.0}{limit}", thresholds.critical), &panel.critical))
+                        .child(div().text_sm().opacity(0.7).child(note))
                 })
         });
 
@@ -552,8 +560,110 @@ impl DashboardView {
             )
             .child(content)
             .children(clock_options)
+            .children(battery_options)
             .children(usage_colors)
             .child(style)
+    }
+
+    /// The Batteries widget's device list: show or hide each one, and give it your own name.
+    fn battery_devices(&self, index: usize, options: &BatteryOptions, cx: &mut Context<Self>) -> Div {
+        let batteries = self.stats.read(cx).batteries.clone();
+        let panel = &self.widget_panels[index];
+        let found = !batteries.is_empty();
+        let rows = batteries.into_iter().enumerate().map(|(row, battery)| {
+            let name = battery.name.clone();
+            let shown = !options.hidden.contains(&name);
+            let status = match battery.connected {
+                true => format!("{}%", battery.level),
+                false => format!("{}% · switched off", battery.level),
+            };
+            let name_box = panel.battery_names.iter().find(|(device, _)| *device == name).map(|(_, input)| input);
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_x_3()
+                .gap_y_1()
+                // Fixed width, so the name boxes line up.
+                .child(
+                    div()
+                        .w(px(300.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(Checkbox::new(("battery-shown", row)).checked(shown).label(name.clone()).on_click(
+                            cx.listener(move |this, show: &bool, _, cx| {
+                                let name = name.clone();
+                                this.update_widget(index, cx, |config| {
+                                    config.battery.hidden.retain(|hidden| *hidden != name);
+                                    if !*show {
+                                        config.battery.hidden.push(name);
+                                    }
+                                });
+                                cx.notify();
+                            }),
+                        ))
+                        .child(div().text_sm().opacity(0.6).child(status)),
+                )
+                .children(name_box.map(|input| div().flex_1().min_w(px(160.)).child(Input::new(input))))
+        });
+        let rows: Vec<_> = rows.collect();
+
+        section("Devices")
+            .child(self.checkbox(
+                "show-disconnected",
+                "Also show devices that are switched off (faded, with the last level Windows heard)",
+                options.show_disconnected,
+                index,
+                |c, v| c.battery.show_disconnected = v,
+                cx,
+            ))
+            .children(rows)
+            .when(!found, |devices| {
+                devices.child(div().opacity(0.7).child("No batteries found yet. The list is read every 15 seconds."))
+            })
+            .child(div().text_sm().opacity(0.7).child(
+                "Untick a device to leave it out, and type a name to show instead of its own. These are the \
+                 levels Windows shows in Settings > Bluetooth & devices; devices send them every few \
+                 minutes. Devices on their own USB receiver (like Logitech Lightspeed) don't report to \
+                 Windows, so they can't be listed.",
+            ))
+    }
+
+    /// Makes a name box for every battery the open Batteries widget doesn't have one for yet.
+    /// Done while drawing, since a device can show up at any time.
+    fn add_battery_name_boxes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Selected::Widget(index) = self.selected else { return };
+        let config = self.dashboard.widgets[index].clone();
+        if config.read(cx).kind != WidgetKind::Battery {
+            return;
+        }
+        let devices: Vec<String> = self.stats.read(cx).batteries.iter().map(|battery| battery.name.clone()).collect();
+        for device in devices {
+            if self.widget_panels[index].battery_names.iter().any(|(name, _)| *name == device) {
+                continue;
+            }
+            let current = config.read(cx).battery.names.get(&device).cloned().unwrap_or_default();
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(device.clone()).default_value(current));
+            let (config, key) = (config.clone(), device.clone());
+            let subscription = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let text = input.read(cx).value().trim().to_string();
+                    config.update(cx, |config, cx| {
+                        if text.is_empty() {
+                            config.battery.names.remove(&key);
+                        } else {
+                            config.battery.names.insert(key.clone(), text);
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+            let panel = &mut self.widget_panels[index];
+            panel.battery_names.push((device, input));
+            panel._subscriptions.push(subscription);
+        }
     }
 
     fn drive_picker(&self, index: usize, current: &str, cx: &mut Context<Self>) -> Div {
@@ -986,7 +1096,8 @@ fn labeled_slider(label: String, slider: &Entity<SliderState>) -> Div {
 }
 
 impl Render for DashboardView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.add_battery_name_boxes(window, cx);
         let options = match self.selected {
             Selected::Widget(index) => self.widget_options(index, cx),
             Selected::General => self.general_options(cx),

@@ -1,4 +1,5 @@
-//! System numbers for the widgets: CPU, RAM, disks and (when Windows exposes it) temperature.
+//! System numbers for the widgets: CPU, RAM, disks, network, batteries and (when Windows
+//! exposes it) temperature.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -6,10 +7,14 @@ use std::time::{Duration, Instant};
 use gpui_kit::*;
 use sysinfo::{Components, Disks, Networks, System};
 
+use crate::battery::{self, Battery};
+
 /// How often the numbers are read.
 const TICK: Duration = Duration::from_secs(1);
 /// The temperature (a slow WMI query) and the list of drives are only re-read every this many ticks.
 const SLOW_EVERY: u32 = 5;
+/// Battery levels change slowly (and devices only report every few minutes), so every 15 ticks.
+const BATTERY_EVERY: u32 = 15;
 /// How many readings the history graphs keep (one per tick, so 60 = the last minute).
 pub const HISTORY_LEN: usize = 60;
 
@@ -52,6 +57,8 @@ pub struct SystemStats {
     /// Bytes per second, all network adapters together.
     pub net_down: f32,
     pub net_up: f32,
+    /// This PC's battery and the devices that report one.
+    pub batteries: Vec<Battery>,
     /// CPU and RAM in %, network in bytes per second.
     pub cpu_history: History,
     pub ram_history: History,
@@ -73,7 +80,7 @@ struct Sampler {
 }
 
 impl Sampler {
-    fn read(&mut self, slow: bool, into: &mut SystemStats) {
+    fn read(&mut self, slow: bool, batteries: bool, into: &mut SystemStats) {
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
         if slow {
@@ -116,6 +123,9 @@ impl Sampler {
                 .filter(|celsius| celsius.is_finite() && *celsius > 0.)
                 .reduce(f32::max);
         }
+        if batteries {
+            into.batteries = battery::read();
+        }
     }
 }
 
@@ -135,12 +145,13 @@ pub fn start(cx: &mut App) -> Entity<SystemStats> {
         let mut tick = 0u32;
         loop {
             let slow = tick % SLOW_EVERY == 0;
+            let batteries = tick % BATTERY_EVERY == 0;
             // Reading can take a while (the WMI query especially), so do it off the UI thread.
             // The sampler goes into the background task and comes back out with the result.
             (sampler, fresh) = cx
                 .background_executor()
                 .spawn(async move {
-                    sampler.read(slow, &mut fresh);
+                    sampler.read(slow, batteries, &mut fresh);
                     (sampler, fresh)
                 })
                 .await;
@@ -157,6 +168,9 @@ pub fn start(cx: &mut App) -> Entity<SystemStats> {
                 stats.net_down_history.push(fresh.net_down);
                 if slow {
                     stats.cpu_temperature = fresh.cpu_temperature;
+                }
+                if batteries {
+                    stats.batteries = fresh.batteries.clone();
                 }
                 cx.notify();
             });

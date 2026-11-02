@@ -14,14 +14,18 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sysinfo = "0.31.4"
 
-# Win32 calls used to keep the desktop widget on the desktop layer (also through Win+D).
+# Win32 calls used to keep the desktop widget on the desktop layer (also through Win+D),
+# and to read battery levels.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
     "Win32_System_LibraryLoader",
+    "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",

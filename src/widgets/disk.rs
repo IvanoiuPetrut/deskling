@@ -16,8 +16,9 @@ impl WidgetType for Disk {
                 value: gigabytes(disk.free),
                 bar: Some(1. - disk.free as f32 / disk.total.max(1) as f32),
                 graph: None,
+                rows: Vec::new(),
             },
-            None => Content { label: "Disk".into(), value: "–".into(), bar: None, graph: None },
+            None => Content { label: "Disk".into(), value: "–".into(), bar: None, graph: None, rows: Vec::new() },
         }
     }
 }

@@ -16,6 +16,7 @@ impl WidgetType for Ram {
             value: format!("{:.0}%", used * 100.),
             bar: Some(used),
             graph: Some(Graph { points: stats.ram_history.to_vec(), max: 100. }),
+            rows: Vec::new(),
         }
     }
 

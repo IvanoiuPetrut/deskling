@@ -1,6 +1,7 @@
 //! The widget types. Each one lives in its own file and implements [`WidgetType`]: what it's
 //! called and what it shows. Adding a new widget = a new file + a `WidgetKind` variant.
 
+mod battery;
 mod clock;
 mod cpu;
 mod disk;
@@ -13,6 +14,7 @@ use crate::dashboard::{WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
 
 /// What a widget shows, top to bottom: a small label, the big value, then a bar or a graph.
+/// A widget with `rows` (one per battery, say) shows those under the label instead.
 pub struct Content {
     pub label: String,
     pub value: String,
@@ -20,6 +22,17 @@ pub struct Content {
     pub bar: Option<f32>,
     /// Recent values for the history graph (drawn instead of the bar when the graph is on).
     pub graph: Option<Graph>,
+    pub rows: Vec<Row>,
+}
+
+/// One line of a list widget: a name on the left, a value on the right, a bar below.
+pub struct Row {
+    pub name: String,
+    pub value: String,
+    /// 0.0–1.0, the bar's fill; also what the threshold colors look at.
+    pub fill: f32,
+    /// Drawn faded, e.g. a device that's switched off (its value is old).
+    pub dimmed: bool,
 }
 
 /// Values oldest first; `max` is the value that reaches the top of the graph.
@@ -39,6 +52,11 @@ pub trait WidgetType {
     fn has_graph(&self) -> bool {
         false
     }
+
+    /// The threshold colors warn when the value gets low (batteries) instead of high (CPU).
+    fn warns_when_low(&self) -> bool {
+        false
+    }
 }
 
 /// The implementation for a kind. `&'static dyn WidgetType` = "some type that implements
@@ -50,6 +68,7 @@ pub fn widget_type(kind: WidgetKind) -> &'static dyn WidgetType {
         WidgetKind::Ram => &ram::Ram,
         WidgetKind::Disk => &disk::Disk,
         WidgetKind::Network => &network::Network,
+        WidgetKind::Battery => &battery::Batteries,
     }
 }
 

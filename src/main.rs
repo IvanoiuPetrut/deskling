@@ -4,6 +4,7 @@
 
 use gpui_kit::*;
 
+mod battery;
 mod dashboard;
 mod dashboard_view;
 mod glass;

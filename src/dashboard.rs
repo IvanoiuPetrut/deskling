@@ -1,5 +1,6 @@
 //! What's on the desktop: the list of widgets, each one's settings, and saving it all to disk.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gpui_kit::*;
@@ -16,11 +17,18 @@ pub enum WidgetKind {
     Ram,
     Disk,
     Network,
+    Battery,
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 5] =
-        [WidgetKind::Clock, WidgetKind::Cpu, WidgetKind::Ram, WidgetKind::Disk, WidgetKind::Network];
+    pub const ALL: [WidgetKind; 6] = [
+        WidgetKind::Clock,
+        WidgetKind::Cpu,
+        WidgetKind::Ram,
+        WidgetKind::Disk,
+        WidgetKind::Network,
+        WidgetKind::Battery,
+    ];
 
     pub fn name(self) -> &'static str {
         widget_type(self).name()
@@ -58,6 +66,18 @@ impl Default for Thresholds {
     fn default() -> Self {
         Self { enabled: false, warning: 70., critical: 90. }
     }
+}
+
+/// Battery widget: which devices to list, and what to call them.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BatteryOptions {
+    /// Devices not to list, by the name Windows gives them.
+    pub hidden: Vec<String>,
+    /// Your own names for devices, by the name Windows gives them.
+    pub names: BTreeMap<String, String>,
+    /// Also list paired devices that are switched off, faded, with their last known level.
+    pub show_disconnected: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -123,6 +143,7 @@ pub struct WidgetConfig {
     pub parts: Parts,
     pub thresholds: Thresholds,
     pub clock: ClockOptions,
+    pub battery: BatteryOptions,
     /// Can't be dragged.
     pub locked: bool,
 }
@@ -166,6 +187,7 @@ struct WidgetFile {
     parts: Parts,
     thresholds: Thresholds,
     clock: ClockOptions,
+    battery: BatteryOptions,
     locked: bool,
 }
 
@@ -184,6 +206,7 @@ impl Default for WidgetFile {
             parts: Parts::default(),
             thresholds: Thresholds::default(),
             clock: ClockOptions::default(),
+            battery: BatteryOptions::default(),
             locked: false,
         }
     }
@@ -203,6 +226,7 @@ impl WidgetFile {
             parts: self.parts,
             thresholds: self.thresholds,
             clock: self.clock,
+            battery: self.battery,
             locked: self.locked,
         }
     }
@@ -274,6 +298,11 @@ impl Dashboard {
             enabled: true,
             x: 100. + (count / 6.).floor() * 260.,
             y: 100. + (count % 6.) * 130.,
+            // Batteries warn when they run low, so this starts on with low-battery levels.
+            thresholds: match kind {
+                WidgetKind::Battery => Thresholds { enabled: true, warning: 30., critical: 15. },
+                _ => Thresholds::default(),
+            },
             ..Default::default()
         };
         let config = cx.new(|cx| widget.into_config(cx));
@@ -303,6 +332,7 @@ impl Dashboard {
                         parts: widget.parts.clone(),
                         thresholds: widget.thresholds,
                         clock: widget.clock,
+                        battery: widget.battery.clone(),
                         locked: widget.locked,
                     }
                 })

@@ -7,13 +7,16 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
-use crate::dashboard::WidgetConfig;
+use crate::dashboard::{Thresholds, WidgetConfig};
 use crate::glass::{self, ScreenRect};
 use crate::stats::{HISTORY_LEN, SystemStats};
 use crate::widgets::{Content, Graph, widget_type};
 
 /// How often the desktop picture behind the glass is retaken, to catch wallpaper/icon changes.
 const GLASS_REFRESH: Duration = Duration::from_secs(10);
+/// Rows of a list widget (batteries): text size in parts of the font size, and line height.
+const ROW_FONT: f32 = 0.6;
+const ROW_LINE: f32 = 1.3;
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BorderKind {
@@ -130,8 +133,12 @@ impl DesktopWidget {
             cx.observe_in(&config, window, |this, _, window, cx| this.restyle(window, cx)),
             cx.observe_in(&own_style, window, |this, _, window, cx| this.restyle(window, cx)),
             cx.observe_in(&shared_style, window, |this, _, window, cx| this.restyle(window, cx)),
-            // New numbers every second (this also keeps the clock ticking).
-            cx.observe(&stats, |_, _, cx| cx.notify()),
+            // New numbers every second (this also keeps the clock ticking). A list widget may
+            // also need to grow or shrink when a device comes or goes.
+            cx.observe_in(&stats, window, |this, _, window, cx| {
+                resize_if_needed(window, this.wanted_size(cx));
+                cx.notify();
+            }),
             // Dragged or resized: remember where, and what's behind it changed.
             cx.observe_window_bounds(window, |this, window, cx| {
                 let origin = window.bounds().origin;
@@ -174,12 +181,28 @@ impl DesktopWidget {
     }
 
     fn restyle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let style = self.style(cx);
-        let wanted = size(px(style.width), px(style.height));
-        if window.viewport_size() != wanted {
-            window.resize(wanted);
-        }
+        resize_if_needed(window, self.wanted_size(cx));
         self.update_glass(window, cx);
+    }
+
+    /// The style's size, but tall enough for every row of a list widget. The heights here
+    /// follow the layout in `render`, with a few pixels to spare.
+    fn wanted_size(&self, cx: &App) -> Size<Pixels> {
+        let style = self.style(cx);
+        let parts = &self.config.read(cx).parts;
+        let rows = self.content(cx).rows.len() as f32;
+        let mut height = style.height;
+        if rows > 0. {
+            // GPUI's default line height is 1.618 x the text size.
+            let label = if parts.show_label { style.font_size * style.label_size / 100. * 1.618 } else { 0. };
+            let bar = if parts.show_bar { 2. + 3. } else { 0. };
+            let row = style.font_size * ROW_FONT * ROW_LINE + bar;
+            let border = if style.border == BorderKind::None { 0. } else { 2. * style.border_width };
+            // Label and rows are 4 px apart (`gap_1`).
+            let needed = 2. * style.padding + border + label + rows * (row + 4.) + 6.;
+            height = height.max(needed);
+        }
+        size(px(style.width), px(height))
     }
 
     /// Rebuilds the blurred background for the widget's current position, size and style.
@@ -222,6 +245,36 @@ impl DesktopWidget {
     }
 }
 
+/// Resizes the window unless it's already about `wanted` (sizes round to whole device pixels,
+/// so an exact compare could resize again on every update).
+fn resize_if_needed(window: &mut Window, wanted: Size<Pixels>) {
+    let current = window.viewport_size();
+    let off = |a: Pixels, b: Pixels| f32::from(a - b).abs() > 1.;
+    if off(current.width, wanted.width) || off(current.height, wanted.height) {
+        window.resize(wanted);
+    }
+}
+
+/// The threshold color for a level in %, if it's past the warning or critical one. With
+/// `when_low` (batteries) "past" means at or below, otherwise at or above.
+fn threshold_color(percent: f32, thresholds: Thresholds, when_low: bool, style: &WidgetStyle) -> Option<Hsla> {
+    let past = |limit: f32| if when_low { percent <= limit } else { percent >= limit };
+    match thresholds.enabled {
+        true if past(thresholds.critical) => Some(style.critical_color),
+        true if past(thresholds.warning) => Some(style.warning_color),
+        _ => None,
+    }
+}
+
+/// A thin rounded bar, filled to `fill` (0.0-1.0). The caller sets its width.
+fn usage_bar(fill: f32, color: Hsla, height: f32) -> Div {
+    div()
+        .h(px(height))
+        .rounded_full()
+        .bg(color.opacity(0.25))
+        .child(div().h_full().w(relative(fill.clamp(0., 1.))).rounded_full().bg(color))
+}
+
 /// A small area chart of `graph`, newest value at the right edge, drawn with GPUI paths.
 fn history_graph(graph: Graph, color: Hsla) -> Canvas<()> {
     canvas(
@@ -262,10 +315,11 @@ fn history_graph(graph: Graph, color: Hsla) -> Canvas<()> {
 
 impl Render for DesktopWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Content { label, value, bar, graph } = self.content(cx);
+        let Content { label, value, bar, graph, rows } = self.content(cx);
         let config = self.config.read(cx);
         let (parts, thresholds, show_graph, locked) =
             (config.parts.clone(), config.thresholds, config.show_graph, config.locked);
+        let warns_when_low = widget_type(config.kind).warns_when_low();
         let style = self.style(cx).clone();
 
         // A custom label from the dashboard replaces the automatic one.
@@ -273,11 +327,7 @@ impl Render for DesktopWidget {
 
         // Usage in % (the bar's fill), for the threshold colors. Widgets without a bar have none.
         let usage = bar.map(|fill| fill * 100.);
-        let level_color = match usage {
-            Some(usage) if thresholds.enabled && usage >= thresholds.critical => Some(style.critical_color),
-            Some(usage) if thresholds.enabled && usage >= thresholds.warning => Some(style.warning_color),
-            _ => None,
-        };
+        let level_color = usage.and_then(|usage| threshold_color(usage, thresholds, warns_when_low, &style));
         let accent = level_color.unwrap_or(style.accent_color);
 
         // The graph replaces the bar when it's turned on and the widget has one.
@@ -298,22 +348,32 @@ impl Render for DesktopWidget {
                     div().text_size(px(style.font_size * style.label_size / 100.)).opacity(0.8).child(label),
                 )
             })
-            .when(parts.show_value, |text| {
+            .when(rows.is_empty() && parts.show_value, |text| {
                 text.child(div().when_some(level_color, |value, color| value.text_color(color)).child(value))
             })
-            .when(parts.show_bar, |text| {
-                text.children(bar.map(|fill| {
-                    div()
-                        .w(relative(0.8))
-                        .h(px(4.))
-                        .rounded_full()
-                        .bg(accent.opacity(0.25))
-                        .child(div().h_full().w(relative(fill.clamp(0., 1.))).rounded_full().bg(accent))
-                }))
+            .when(rows.is_empty() && parts.show_bar, |text| {
+                text.children(bar.map(|fill| usage_bar(fill, accent, 4.).w(relative(0.8))))
                 .children(graph.map(|graph| {
                     div().w(relative(0.85)).h(px(style.font_size * 1.1)).child(history_graph(graph, accent).size_full())
                 }))
-            });
+            })
+            .children(rows.into_iter().map(|row| {
+                let color = threshold_color(row.fill * 100., thresholds, warns_when_low, &style);
+                let name = div().flex_1().min_w_0().truncate().child(row.name);
+                let value = div().flex_none().when_some(color, |value, color| value.text_color(color)).child(row.value);
+                div()
+                    .w(relative(0.9))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .text_size(px(style.font_size * ROW_FONT))
+                    .line_height(relative(ROW_LINE))
+                    .when(row.dimmed, |row| row.opacity(0.45))
+                    .child(div().flex().gap_2().child(name).when(parts.show_value, |line| line.child(value)))
+                    .when(parts.show_bar, |line| {
+                        line.child(usage_bar(row.fill, color.unwrap_or(style.accent_color), 3.).w_full())
+                    })
+            }));
 
         // Layers, back to front: blurred desktop, tint (background color + opacity), text.
         let content = |radius: f32| {
