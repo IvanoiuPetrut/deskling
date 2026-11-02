@@ -18,6 +18,7 @@ impl WidgetType for Disk {
                 graph: None,
                 rows: Vec::new(),
                 player: None,
+                icon: None,
             },
             None => Content {
                 label: "Disk".into(),
@@ -26,6 +27,7 @@ impl WidgetType for Disk {
                 graph: None,
                 rows: Vec::new(),
                 player: None,
+                icon: None,
             },
         }
     }

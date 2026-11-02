@@ -22,15 +22,16 @@ impl WidgetType for Batteries {
                 Row {
                     name: if battery.charging { format!("{name} · charging") } else { name.clone() },
                     value: format!("{}%", battery.level),
-                    fill: battery.level as f32 / 100.,
+                    fill: Some(battery.level as f32 / 100.),
                     dimmed: !battery.connected,
+                    icon: None,
                 }
             })
             .collect();
 
         let value = if rows.is_empty() { "–".into() } else { String::new() };
         let label = if rows.is_empty() { "No batteries connected".into() } else { "Batteries".into() };
-        Content { label, value, bar: None, graph: None, rows, player: None }
+        Content { label, value, bar: None, graph: None, rows, player: None, icon: None }
     }
 
     fn warns_when_low(&self) -> bool {

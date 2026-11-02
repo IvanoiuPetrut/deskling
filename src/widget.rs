@@ -12,6 +12,7 @@ use crate::dashboard::{Thresholds, WidgetConfig, WidgetKind};
 use crate::glass::{self, ScreenRect};
 use crate::media::{self, Command};
 use crate::stats::{HISTORY_LEN, SystemStats};
+use crate::weather;
 use crate::widgets::{Content, Graph, Player, widget_type};
 
 /// How often the desktop picture behind the glass is retaken, to catch wallpaper/icon changes.
@@ -241,6 +242,7 @@ impl DesktopWidget {
     }
 
     fn restyle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        watch_weather(self.config.read(cx));
         resize_if_needed(window, self.wanted_size(cx));
         self.update_glass(window, cx);
     }
@@ -251,7 +253,7 @@ impl DesktopWidget {
         let style = self.style(cx);
         let config = self.config.read(cx);
         let parts = &config.parts;
-        let rows = self.content(&self.latest_stats, cx).rows.len() as f32;
+        let content = self.content(&self.latest_stats, cx);
         let (mut width, mut height) = (style.width, style.height);
         let border = if style.border == BorderKind::None { 0. } else { 2. * style.border_width };
         if config.kind == WidgetKind::NowPlaying {
@@ -267,13 +269,23 @@ impl DesktopWidget {
             let edge = if edge > 0. { edge + 4. } else { 0. };
             height = height.max(2. * style.padding + border + title + gap + artist + 2. * edge + 4.);
         }
-        if rows > 0. {
+        if !content.rows.is_empty() {
             // GPUI's default line height is 1.618 x the text size.
             let label = if parts.show_label { style.font_size * style.label_size / 100. * 1.618 } else { 0. };
-            let bar = if parts.show_bar { 2. + 3. } else { 0. };
-            let row = style.font_size * ROW_FONT * ROW_LINE + bar;
-            // Label and rows are 4 px apart (`gap_1`).
-            let needed = 2. * style.padding + border + label + rows * (row + 4.) + 6.;
+            let value = match parts.show_value && !content.value.is_empty() {
+                true => style.font_size * 1.618 + 4.,
+                false => 0.,
+            };
+            let rows: f32 = content
+                .rows
+                .iter()
+                .map(|row| {
+                    let bar = if parts.show_bar && row.fill.is_some() { 2. + 3. } else { 0. };
+                    style.font_size * ROW_FONT * ROW_LINE + bar + 4.
+                })
+                .sum();
+            // Label, value and rows are 4 px apart (`gap_1`).
+            let needed = 2. * style.padding + border + label + value + rows + 6.;
             height = height.max(needed);
         }
         size(px(width), px(height))
@@ -365,6 +377,15 @@ impl DesktopWidget {
     }
 }
 
+/// A Weather widget's place gets its weather fetched (from then on, every 15 minutes).
+fn watch_weather(config: &WidgetConfig) {
+    if config.kind == WidgetKind::Weather
+        && let Some(place) = &config.weather.place
+    {
+        weather::watch(place);
+    }
+}
+
 /// Resizes the window unless it's already about `wanted` (sizes round to whole device pixels,
 /// so an exact compare could resize again on every update).
 fn resize_if_needed(window: &mut Window, wanted: Size<Pixels>) {
@@ -438,7 +459,7 @@ impl Render for DesktopWidget {
         let animations = *self.animations.read(cx);
         let stats = self.shown_stats(cx);
         let gliding = matches!(stats, std::borrow::Cow::Owned(_));
-        let Content { label, value, bar, graph, rows, player } = self.content(&stats, cx);
+        let Content { label, value, bar, graph, rows, player, icon } = self.content(&stats, cx);
         let fade = animations.fade_in.progress(self.opened);
         // Keep drawing frames until both animations are done.
         if gliding || fade.is_some() {
@@ -551,8 +572,17 @@ impl Render for DesktopWidget {
                         div().text_size(px(style.font_size * style.label_size / 100.)).opacity(0.8).child(label),
                     )
                 })
-                .when(rows.is_empty() && parts.show_value, |text| {
-                    text.child(div().when_some(level_color, |value, color| value.text_color(color)).child(value))
+                .when(parts.show_value && !value.is_empty(), |text| {
+                    let value = div().when_some(level_color, |value, color| value.text_color(color)).child(value);
+                    text.child(match icon {
+                        Some(icon) => div()
+                            .flex()
+                            .items_center()
+                            .gap(px(style.font_size * 0.3))
+                            .child(svg().data(icon).size(px(style.font_size * 1.1)).text_color(style.text_color))
+                            .child(value),
+                        None => value,
+                    })
                 })
                 .when(rows.is_empty() && parts.show_bar, |text| {
                     text.children(bar.map(|fill| usage_bar(fill, accent, 4.).w(relative(0.8))))
@@ -561,7 +591,9 @@ impl Render for DesktopWidget {
                     }))
                 })
                 .children(rows.into_iter().map(|row| {
-                    let color = threshold_color(row.fill * 100., thresholds, warns_when_low, &style);
+                    let color = row.fill.and_then(|fill| threshold_color(fill * 100., thresholds, warns_when_low, &style));
+                    let icon_size = style.font_size * ROW_FONT * 1.15;
+                    let icon = row.icon.map(|icon| svg().data(icon).flex_none().size(px(icon_size)).text_color(style.text_color));
                     let name = div().flex_1().min_w_0().truncate().child(row.name);
                     let value = div().flex_none().when_some(color, |value, color| value.text_color(color)).child(row.value);
                     div()
@@ -572,9 +604,19 @@ impl Render for DesktopWidget {
                         .text_size(px(style.font_size * ROW_FONT))
                         .line_height(relative(ROW_LINE))
                         .when(row.dimmed, |row| row.opacity(0.45))
-                        .child(div().flex().gap_2().child(name).when(parts.show_value, |line| line.child(value)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .children(icon)
+                                .child(name)
+                                .when(parts.show_value, |line| line.child(value)),
+                        )
                         .when(parts.show_bar, |line| {
-                            line.child(usage_bar(row.fill, color.unwrap_or(style.accent_color), 3.).w_full())
+                            line.children(
+                                row.fill.map(|fill| usage_bar(fill, color.unwrap_or(style.accent_color), 3.).w_full()),
+                            )
                         })
                 })),
         };
@@ -650,6 +692,7 @@ pub fn open(
     if current.kind == WidgetKind::NowPlaying {
         media::start();
     }
+    watch_weather(current);
     let style = if current.use_shared_style { shared_style.read(cx) } else { current.style.read(cx) };
     let bounds = Bounds::new(current.position, size(px(style.width), px(style.height)));
     let options = WindowOptions {

@@ -13,9 +13,10 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::animation::MotionKind;
-use crate::dashboard::{BatteryOptions, Dashboard, DateFormat, WidgetConfig, WidgetKind};
+use crate::dashboard::{BatteryOptions, Dashboard, DateFormat, WeatherOptions, WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
 use crate::theme::{self, Theme, ThemeLibrary};
+use crate::weather::{self, Place};
 use crate::motion_settings::MotionSettings;
 use crate::widget;
 use crate::widget_settings::WidgetSettings;
@@ -32,6 +33,9 @@ enum Selected {
     Animations,
 }
 
+/// How long typing has to pause before the city search runs.
+const SEARCH_DELAY: Duration = Duration::from_millis(400);
+
 /// The editing state of one widget's options page (text box, sliders, style editor).
 struct WidgetPanel {
     style: Entity<WidgetSettings>,
@@ -42,6 +46,12 @@ struct WidgetPanel {
     /// Batteries widget: a name box per device, by the device's Windows name. Added as devices
     /// show up (see `DashboardView::add_battery_name_boxes`).
     battery_names: Vec<(String, Entity<InputState>)>,
+    /// Weather widget: the city search box, the places it found, and how the search went.
+    city: Entity<InputState>,
+    places: Vec<Place>,
+    search_status: Option<SharedString>,
+    /// Counts searches, so an answer that comes in after a newer search started is ignored.
+    searches: usize,
     // Dropped together with the panel when the widget is removed.
     _subscriptions: Vec<Subscription>,
 }
@@ -60,6 +70,7 @@ impl WidgetPanel {
         let themes = themes.clone();
         let style = cx.new(|cx| WidgetSettings::new(style, themes, window, cx));
         let label = cx.new(|cx| InputState::new(window, cx).placeholder("Automatic").default_value(label_text));
+        let city = cx.new(|cx| InputState::new(window, cx).placeholder("Type a city, e.g. Oslo"));
         let slider = |min: f32, max: f32, step: f32, value: f32, cx: &mut Context<DashboardView>| {
             cx.new(|_| SliderState::new().min(min).max(max).step(step).default_value(value))
         };
@@ -78,12 +89,33 @@ impl WidgetPanel {
                     });
                 }
             }),
+            cx.subscribe(&city, {
+                let config = config.clone();
+                move |this, input, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let name = input.read(cx).value().to_string();
+                        this.search_places(&config, name, cx);
+                    }
+                }
+            }),
             Self::on_slide(&warning, config, |config, value| config.thresholds.warning = value, cx),
             Self::on_slide(&critical, config, |config, value| config.thresholds.critical = value, cx),
             Self::on_slide(&utc_offset, config, |config, value| config.clock.utc_offset = Some(value), cx),
         ];
 
-        Self { style, label, warning, critical, utc_offset, battery_names: Vec::new(), _subscriptions: subscriptions }
+        Self {
+            style,
+            label,
+            warning,
+            critical,
+            utc_offset,
+            battery_names: Vec::new(),
+            city,
+            places: Vec::new(),
+            search_status: None,
+            searches: 0,
+            _subscriptions: subscriptions,
+        }
     }
 
     /// Writes a slider's value into the widget's config whenever it moves.
@@ -300,6 +332,9 @@ impl DashboardView {
         }
         match config.kind {
             WidgetKind::Disk => format!("{} ({})", config.kind.name(), config.disk).into(),
+            WidgetKind::Weather if let Some(place) = &config.weather.place => {
+                format!("{} ({})", config.kind.name(), place.name).into()
+            }
             kind => kind.name().into(),
         }
     }
@@ -395,7 +430,7 @@ impl DashboardView {
         let (enabled, use_shared_style, locked) = (config.enabled, config.use_shared_style, config.locked);
         let (show_temperature, show_graph, disk) = (config.show_temperature, config.show_graph, config.disk.clone());
         let (parts, thresholds, clock) = (config.parts.clone(), config.thresholds, config.clock);
-        let (battery, media) = (config.battery.clone(), config.media);
+        let (battery, media, weather) = (config.battery.clone(), config.media, config.weather.clone());
         let panel = &self.widget_panels[index];
         let has_graph = widget_type(kind).has_graph();
         // Widgets with a usage % (shown as their bar) can be colored by it. Batteries warn when low.
@@ -404,9 +439,10 @@ impl DashboardView {
 
         // Now Playing's label is the artist and its value the title (a custom label would hide the artist).
         let player = kind == WidgetKind::NowPlaying;
-        let (show_label, show_value, show_bar) = match player {
-            true => ("Show artist", "Show title", "Show progress bar"),
-            false => ("Show label", "Show value", "Show bar / graph"),
+        let (show_label, show_value, show_bar) = match kind {
+            WidgetKind::NowPlaying => ("Show artist", "Show title", "Show progress bar"),
+            WidgetKind::Weather => ("Show place and sky", "Show temperature", ""),
+            _ => ("Show label", "Show value", "Show bar / graph"),
         };
 
         // --- Content ---
@@ -421,7 +457,7 @@ impl DashboardView {
                     .gap_4()
                     .child(self.checkbox("show-label", show_label, parts.show_label, index, |c, v| c.parts.show_label = v, cx))
                     .child(self.checkbox("show-value", show_value, parts.show_value, index, |c, v| c.parts.show_value = v, cx))
-                    .when(kind != WidgetKind::Clock, |row| {
+                    .when(!matches!(kind, WidgetKind::Clock | WidgetKind::Weather), |row| {
                         row.child(self.checkbox(
                             "show-bar",
                             show_bar,
@@ -518,6 +554,9 @@ impl DashboardView {
                 ))
         });
 
+        // --- Weather ---
+        let weather_options = (kind == WidgetKind::Weather).then(|| self.weather_options(index, &weather, cx));
+
         // --- Batteries ---
         let battery_options = (kind == WidgetKind::Battery).then(|| self.battery_devices(index, &battery, cx));
 
@@ -607,6 +646,7 @@ impl DashboardView {
             .child(content)
             .children(clock_options)
             .children(media_options)
+            .children(weather_options)
             .children(battery_options)
             .children(usage_colors)
             .child(style)
@@ -676,6 +716,107 @@ impl DashboardView {
                  minutes. Devices on their own USB receiver (like Logitech Lightspeed) don't report to \
                  Windows, so they can't be listed.",
             ))
+    }
+
+    /// The Weather widget's place (picked with a city search), unit and forecast rows.
+    fn weather_options(&self, index: usize, options: &WeatherOptions, cx: &mut Context<Self>) -> Div {
+        let panel = &self.widget_panels[index];
+        let results = panel.places.iter().enumerate().map(|(row, place)| {
+            let picked = place.clone();
+            Button::new(("place", row)).small().label(place.full_name()).on_click(cx.listener(move |this, _, _, cx| {
+                let place = picked.clone();
+                this.update_widget(index, cx, |config| config.weather.place = Some(place));
+                this.widget_panels[index].places.clear();
+                cx.notify();
+            }))
+        });
+        let results: Vec<_> = results.collect();
+        let current = match &options.place {
+            Some(place) => format!("Showing the weather in {}.", place.full_name()),
+            None => "No city picked yet: type one above and pick it from the list.".into(),
+        };
+
+        section("Weather")
+            .child(div().flex().flex_col().gap_1().child("City").child(Input::new(&panel.city)))
+            .when(!results.is_empty(), |weather| {
+                weather.child(div().flex().flex_col().items_start().gap_1().children(results))
+            })
+            .children(panel.search_status.clone().map(|status| div().text_sm().opacity(0.7).child(status)))
+            .child(div().child(current))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_4()
+                    .child(self.checkbox(
+                        "fahrenheit",
+                        "Fahrenheit (°F)",
+                        options.fahrenheit,
+                        index,
+                        |c, v| c.weather.fahrenheit = v,
+                        cx,
+                    ))
+                    .child(self.checkbox(
+                        "forecast",
+                        "Show today and the next 2 days",
+                        options.forecast,
+                        index,
+                        |c, v| c.weather.forecast = v,
+                        cx,
+                    )),
+            )
+            .child(div().text_sm().opacity(0.7).child(
+                "Weather data by Open-Meteo.com (free, no account needed), fetched every 15 minutes. \
+                 Without an internet connection the widget keeps the last weather it got and says \
+                 \"offline\".",
+            ))
+    }
+
+    /// Looks up places called `name` for the Weather widget whose settings are `config`, once
+    /// typing pauses. The answer shows as a list to pick from.
+    fn search_places(&mut self, config: &Entity<WidgetConfig>, name: String, cx: &mut Context<Self>) {
+        // Found by its config: the panel's index changes when a widget above it is removed.
+        fn panel_of<'a>(this: &'a mut DashboardView, config: &Entity<WidgetConfig>) -> Option<&'a mut WidgetPanel> {
+            let index = this.dashboard.widgets.iter().position(|widget| widget == config)?;
+            Some(&mut this.widget_panels[index])
+        }
+        let Some(panel) = panel_of(self, config) else { return };
+        panel.searches += 1;
+        let search = panel.searches;
+        if name.trim().chars().count() < 2 {
+            panel.places.clear();
+            panel.search_status = None;
+            cx.notify();
+            return;
+        }
+        let config = config.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DELAY).await;
+            // Still typing: a newer search takes over.
+            let latest = this.update(cx, |this, cx| {
+                let panel = panel_of(this, &config).filter(|panel| panel.searches == search)?;
+                panel.search_status = Some("Searching…".into());
+                cx.notify();
+                Some(())
+            });
+            if !matches!(latest, Ok(Some(()))) {
+                return;
+            }
+            let found = cx.background_executor().spawn(async move { weather::search(&name) }).await;
+            this.update(cx, |this, cx| {
+                let Some(panel) = panel_of(this, &config).filter(|panel| panel.searches == search) else { return };
+                match found {
+                    Ok(places) => {
+                        panel.search_status = places.is_empty().then(|| "No places found by that name.".into());
+                        panel.places = places;
+                    }
+                    Err(error) => panel.search_status = Some(format!("Could not search: {error}").into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Makes a name box for every battery the open Batteries widget doesn't have one for yet.

@@ -18,6 +18,7 @@ impl WidgetType for NowPlaying {
                 graph: None,
                 rows: Vec::new(),
                 player: None,
+                icon: None,
             };
         };
         // Videos and podcasts often have no artist; then the album or the app is shown instead.
@@ -38,6 +39,7 @@ impl WidgetType for NowPlaying {
                 can_previous: media.can_previous,
                 can_next: media.can_next,
             }),
+            icon: None,
         }
     }
 }

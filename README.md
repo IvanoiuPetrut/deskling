@@ -1,7 +1,7 @@
 # Deskling
 
 Desktop widgets for Windows, written in Rust with [GPUI](https://www.gpui.rs/) while learning both: (clock, CPU, RAM, disk
-space, network, batteries, now playing), similar to Rainmeter skins, with a dashboard window to add, remove and style them,
+space, network, batteries, now playing, weather), similar to Rainmeter skins, with a dashboard window to add, remove and style them,
 and a tray icon.
 
 ## Requirements
@@ -49,6 +49,7 @@ src/
 ├── dashboard.rs        the list of widgets and their settings; saving/loading dashboard.json
 ├── dashboard_view.rs   the dashboard window: widget list on the left, options on the right
 ├── stats.rs            reads CPU, RAM, disk, network and temperature once a second, batteries every 15 s
+├── weather.rs          fetches the weather from Open-Meteo every 15 minutes, and the city search
 ├── tray.rs             tray icon, hiding/showing the dashboard, "Start with Windows" (Windows only)
 ├── widget.rs           the desktop widget window, its WidgetStyle, graphs, and the Windows pinning code
 ├── widget_settings.rs  the style editor: theme picker, sliders, border type and color pickers
@@ -57,7 +58,7 @@ src/
 ├── glass.rs            the glass effect: crops and blurs a picture of the desktop behind a widget
 └── widgets/            one file per widget type, each implementing the `WidgetType` trait
     ├── mod.rs          the trait and the kind → type lookup
-    ├── clock.rs  cpu.rs  ram.rs  disk.rs  network.rs  battery.rs  now_playing.rs
+    ├── clock.rs  cpu.rs  ram.rs  disk.rs  network.rs  battery.rs  now_playing.rs  weather.rs
 ```
 
 ## The dashboard
@@ -76,6 +77,7 @@ adds a new one (several of the same type are fine, e.g. two Disk widgets for C: 
 | Network | download and upload speed (all adapters) | history graph |
 | Batteries | one row per battery: this PC's, and Bluetooth mice, keyboards, headsets | which devices, your own names, switched-off devices |
 | Now playing | cover art, title, artist, progress, and previous / play-pause / next buttons | cover art, buttons |
+| Weather | temperature and sky in one city, with an icon; optionally today and the next 2 days | city, °C / °F, forecast rows |
 
 The **history graph** replaces the usage bar with a small chart of the last minute.
 
@@ -101,6 +103,13 @@ pop-up's; a button the app doesn't allow right now (like "previous" on the first
 When several apps are playing, Windows picks which one. The progress bar only shows when the app
 reports the track's length (live streams don't). The widget is at least wide enough for the cover
 and the title, whatever the style's width; its buttons can be clicked even when it can be dragged.
+
+The **Weather** widget uses [Open-Meteo](https://open-meteo.com/) (free, no account or API key).
+Type a city in its options and pick it from the list that comes up. The weather is fetched every
+15 minutes; without an internet connection the widget keeps the last weather it got and adds
+"offline" to its label. **Show today and the next 2 days** adds a row per day with its icon and
+lowest / highest temperature. The requests go out with the certificates Windows trusts, so they also
+work behind company proxies that inspect HTTPS.
 
 The **Layout** page has **Snap to grid** (widgets move in grid steps while you drag them, grid size
 5–100 px) and **Lock all / Unlock all**.

@@ -8,6 +8,7 @@ mod disk;
 mod network;
 mod now_playing;
 mod ram;
+mod weather;
 
 pub use clock::utc_name;
 
@@ -21,6 +22,7 @@ use crate::stats::SystemStats;
 /// What a widget shows, top to bottom: a small label, the big value, then a bar or a graph.
 /// A widget with `rows` (one per battery, say) shows those under the label instead, and one
 /// with a `player` (Now Playing) puts its cover art beside the text and buttons under it.
+/// A widget can have both a value and rows (Weather: the temperature, then the next days).
 pub struct Content {
     pub label: String,
     pub value: String,
@@ -30,6 +32,8 @@ pub struct Content {
     pub graph: Option<Graph>,
     pub rows: Vec<Row>,
     pub player: Option<Player>,
+    /// A small picture before the value (an SVG, drawn in the text color), e.g. the weather.
+    pub icon: Option<&'static [u8]>,
 }
 
 impl Content {
@@ -41,7 +45,7 @@ impl Content {
             (a, b) => a.is_none() && b.is_none(),
         };
         let same_rows = self.rows.len() == other.rows.len()
-            && self.rows.iter().zip(&other.rows).all(|(a, b)| a.value == b.value && close(a.fill, b.fill));
+            && self.rows.iter().zip(&other.rows).all(|(a, b)| a.value == b.value && a.fill.zip(b.fill).is_none_or(|(a, b)| close(a, b)));
         self.label == other.label && self.value == other.value && same_bar && same_rows
     }
 }
@@ -50,10 +54,12 @@ impl Content {
 pub struct Row {
     pub name: String,
     pub value: String,
-    /// 0.0–1.0, the bar's fill; also what the threshold colors look at.
-    pub fill: f32,
+    /// 0.0–1.0, the bar's fill; also what the threshold colors look at. `None` = no bar.
+    pub fill: Option<f32>,
     /// Drawn faded, e.g. a device that's switched off (its value is old).
     pub dimmed: bool,
+    /// A small picture before the name (an SVG, like [`Content::icon`]).
+    pub icon: Option<&'static [u8]>,
 }
 
 /// The Now Playing widget's extras. Its label is the artist, the value the title and the bar
@@ -104,6 +110,7 @@ pub fn widget_type(kind: WidgetKind) -> &'static dyn WidgetType {
         WidgetKind::Network => &network::Network,
         WidgetKind::Battery => &battery::Batteries,
         WidgetKind::NowPlaying => &now_playing::NowPlaying,
+        WidgetKind::Weather => &weather::Weather,
     }
 }
 

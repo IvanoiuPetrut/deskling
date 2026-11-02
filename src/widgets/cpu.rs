@@ -22,6 +22,7 @@ impl WidgetType for Cpu {
             graph: Some(Graph { points: stats.cpu_history.to_vec(), max: 100. }),
             rows: Vec::new(),
             player: None,
+            icon: None,
         }
     }
 

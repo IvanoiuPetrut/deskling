@@ -32,7 +32,7 @@ impl WidgetType for Clock {
         }
 
         let value = now.format(time_pattern).to_string();
-        Content { label, value, bar: None, graph: None, rows: Vec::new(), player: None }
+        Content { label, value, bar: None, graph: None, rows: Vec::new(), player: None, icon: None }
     }
 }
 

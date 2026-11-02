@@ -15,6 +15,7 @@ mod stats;
 mod theme;
 #[cfg(windows)]
 mod tray;
+mod weather;
 mod widget;
 mod widget_settings;
 mod widgets;

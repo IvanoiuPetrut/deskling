@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::animation::Animations;
 use crate::widget::WidgetStyle;
+use crate::weather::Place;
 use crate::widgets::widget_type;
 
 #[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -20,10 +21,11 @@ pub enum WidgetKind {
     Network,
     Battery,
     NowPlaying,
+    Weather,
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 7] = [
+    pub const ALL: [WidgetKind; 8] = [
         WidgetKind::Clock,
         WidgetKind::Cpu,
         WidgetKind::Ram,
@@ -31,6 +33,7 @@ impl WidgetKind {
         WidgetKind::Network,
         WidgetKind::Battery,
         WidgetKind::NowPlaying,
+        WidgetKind::Weather,
     ];
 
     pub fn name(self) -> &'static str {
@@ -98,6 +101,17 @@ impl Default for MediaOptions {
     }
 }
 
+/// Weather widget: where, in which unit, and whether to list the coming days.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeatherOptions {
+    /// Picked with the city search; `None` until then.
+    pub place: Option<Place>,
+    pub fahrenheit: bool,
+    /// Today and the next two days, each with its lowest and highest temperature.
+    pub forecast: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum DateFormat {
     /// Thu 29 Oct
@@ -163,6 +177,7 @@ pub struct WidgetConfig {
     pub clock: ClockOptions,
     pub battery: BatteryOptions,
     pub media: MediaOptions,
+    pub weather: WeatherOptions,
     /// Can't be dragged.
     pub locked: bool,
 }
@@ -217,6 +232,7 @@ struct WidgetFile {
     clock: ClockOptions,
     battery: BatteryOptions,
     media: MediaOptions,
+    weather: WeatherOptions,
     locked: bool,
 }
 
@@ -237,6 +253,7 @@ impl Default for WidgetFile {
             clock: ClockOptions::default(),
             battery: BatteryOptions::default(),
             media: MediaOptions::default(),
+            weather: WeatherOptions::default(),
             locked: false,
         }
     }
@@ -258,6 +275,7 @@ impl WidgetFile {
             clock: self.clock,
             battery: self.battery,
             media: self.media,
+            weather: self.weather,
             locked: self.locked,
         }
     }
@@ -366,6 +384,7 @@ impl Dashboard {
                         clock: widget.clock,
                         battery: widget.battery.clone(),
                         media: widget.media,
+                        weather: widget.weather.clone(),
                         locked: widget.locked,
                     }
                 })

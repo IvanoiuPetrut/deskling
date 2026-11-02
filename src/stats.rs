@@ -10,6 +10,7 @@ use sysinfo::{Components, Disks, Networks, System};
 use crate::animation::lerp;
 use crate::battery::{self, Battery};
 use crate::media::{self, NowPlaying};
+use crate::weather::{self, Report};
 
 /// How often the numbers are read.
 const TICK: Duration = Duration::from_secs(1);
@@ -63,6 +64,8 @@ pub struct SystemStats {
     pub batteries: Vec<Battery>,
     /// What's playing, for the Now Playing widget (read on a thread of its own, see `media.rs`).
     pub media: Option<NowPlaying>,
+    /// The weather at every place a Weather widget shows (fetched on a thread of its own, see `weather.rs`).
+    pub weather: Vec<Report>,
     /// CPU and RAM in %, network in bytes per second.
     pub cpu_history: History,
     pub ram_history: History,
@@ -204,6 +207,7 @@ pub fn start(cx: &mut App) -> Entity<SystemStats> {
                     stats.batteries = fresh.batteries.clone();
                 }
                 stats.media = media::latest();
+                stats.weather = weather::latest();
                 cx.notify();
             });
             if updated.is_err() {

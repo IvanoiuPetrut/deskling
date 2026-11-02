@@ -30,6 +30,7 @@ impl WidgetType for Network {
             graph: Some(Graph { points: downloads, max }),
             rows: Vec::new(),
             player: None,
+            icon: None,
         }
     }
 
