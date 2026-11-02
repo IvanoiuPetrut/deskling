@@ -4,10 +4,12 @@
 
 use gpui_kit::*;
 
+mod animation;
 mod battery;
 mod dashboard;
 mod dashboard_view;
 mod glass;
+mod motion_settings;
 mod stats;
 mod theme;
 #[cfg(windows)]

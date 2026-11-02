@@ -12,9 +12,11 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::animation::MotionKind;
 use crate::dashboard::{BatteryOptions, Dashboard, DateFormat, WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
 use crate::theme::{self, Theme, ThemeLibrary};
+use crate::motion_settings::MotionSettings;
 use crate::widget;
 use crate::widget_settings::WidgetSettings;
 use crate::widgets::{gigabytes, utc_name, widget_type};
@@ -27,6 +29,7 @@ enum Selected {
     SharedStyle,
     Themes,
     Layout,
+    Animations,
 }
 
 /// The editing state of one widget's options page (text box, sliders, style editor).
@@ -113,6 +116,8 @@ pub struct DashboardView {
     /// Each widget's options page state, in the same order as `dashboard.widgets`.
     widget_panels: Vec<WidgetPanel>,
     grid_size: Entity<SliderState>,
+    /// Editors for the values animation and the fade-in.
+    motion_panels: [Entity<MotionSettings>; 2],
     /// The built-in and the user's themes, shared with every style editor.
     themes: Entity<ThemeLibrary>,
     /// Result of the last import / export / delete on the Themes page.
@@ -144,6 +149,10 @@ impl DashboardView {
             dashboard.widgets.iter().map(|config| WidgetPanel::new(config, &themes, window, cx)).collect();
         let grid_size =
             cx.new(|_| SliderState::new().min(5.).max(100.).step(5.).default_value(dashboard.grid_size));
+
+        let animations = dashboard.animations.clone();
+        let motion_panels = [MotionKind::Values, MotionKind::FadeIn]
+            .map(|kind| cx.new(|cx| MotionSettings::new(animations.clone(), kind, cx)));
 
         let subscriptions = vec![
             // The Disk widget's drive list and the Batteries widget's device list come from the
@@ -197,6 +206,7 @@ impl DashboardView {
             shared_panel,
             widget_panels,
             grid_size,
+            motion_panels,
             themes,
             theme_status: None,
             confirm_delete: None,
@@ -216,7 +226,9 @@ impl DashboardView {
     fn selected_kind(&self, cx: &App) -> Option<WidgetKind> {
         match self.selected {
             Selected::Widget(index) => Some(self.dashboard.widgets[index].read(cx).kind),
-            Selected::General | Selected::SharedStyle | Selected::Themes | Selected::Layout => None,
+            Selected::General | Selected::SharedStyle | Selected::Themes | Selected::Layout | Selected::Animations => {
+                None
+            }
         }
     }
 
@@ -239,7 +251,8 @@ impl DashboardView {
             (true, None) => {
                 let config = self.dashboard.widgets[index].clone();
                 let shared_style = self.dashboard.shared_style.clone();
-                self.windows[index] = Some(widget::open(config, shared_style, self.stats.clone(), cx));
+                let animations = self.dashboard.animations.clone();
+                self.windows[index] = Some(widget::open(config, shared_style, self.stats.clone(), animations, cx));
             }
             (true, Some(handle)) => self.windows[index] = Some(handle),
             (false, Some(handle)) => {
@@ -357,6 +370,7 @@ impl DashboardView {
             .child(self.list_item("shared-style", "Shared style", Selected::SharedStyle, cx))
             .child(self.list_item("themes", "Themes", Selected::Themes, cx))
             .child(self.list_item("layout", "Layout", Selected::Layout, cx))
+            .child(self.list_item("animations", "Animations", Selected::Animations, cx))
     }
 
     /// A checkbox that edits one yes/no setting of widget `index`.
@@ -725,6 +739,20 @@ impl DashboardView {
             .child(div().text_sm().opacity(0.7).child(
                 "Locked widgets can't be dragged. Each widget also has its own \"Lock position\" option.",
             ))
+    }
+
+    fn animation_options(&self) -> Div {
+        let [values, fade_in] = self.motion_panels.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(div().text_xl().child("Animations"))
+            .child(div().opacity(0.7).child(
+                "Used by every widget. Changes apply from the next animation on; click Save to keep them.",
+            ))
+            .child(section("Value changes").child(values))
+            .child(section("Fade in").child(fade_in))
     }
 
     fn set_starts_with_windows(&mut self, enabled: bool) {
@@ -1104,6 +1132,7 @@ impl Render for DashboardView {
             Selected::SharedStyle => self.shared_style_options(),
             Selected::Themes => self.theme_options(cx),
             Selected::Layout => self.layout_options(cx),
+            Selected::Animations => self.animation_options(),
         };
 
         let header = div()

@@ -7,6 +7,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
+use crate::animation::Animations;
 use crate::dashboard::{Thresholds, WidgetConfig};
 use crate::glass::{self, ScreenRect};
 use crate::stats::{HISTORY_LEN, SystemStats};
@@ -111,6 +112,17 @@ struct DesktopWidget {
     config: Entity<WidgetConfig>,
     shared_style: Entity<WidgetStyle>,
     stats: Entity<SystemStats>,
+    animations: Entity<Animations>,
+    /// The numbers drawn when the latest reading came in, and that reading: while the values
+    /// animation runs, the widget shows a blend of the two.
+    from_stats: SystemStats,
+    latest_stats: SystemStats,
+    /// When `latest_stats` came in.
+    stats_changed: Instant,
+    /// Whether the latest reading changes anything shown (if not, there's nothing to animate).
+    stats_moving: bool,
+    /// When the window opened, for the fade-in.
+    opened: Instant,
     /// Picture of the desktop, kept so moving the widget only needs a new crop + blur.
     desktop: Option<Rc<glass::Snapshot>>,
     /// The blurred background currently shown, if the glass effect is on.
@@ -124,6 +136,7 @@ impl DesktopWidget {
         config: Entity<WidgetConfig>,
         shared_style: Entity<WidgetStyle>,
         stats: Entity<SystemStats>,
+        animations: Entity<Animations>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -136,6 +149,7 @@ impl DesktopWidget {
             // New numbers every second (this also keeps the clock ticking). A list widget may
             // also need to grow or shrink when a device comes or goes.
             cx.observe_in(&stats, window, |this, _, window, cx| {
+                this.take_new_stats(cx);
                 resize_if_needed(window, this.wanted_size(cx));
                 cx.notify();
             }),
@@ -161,10 +175,17 @@ impl DesktopWidget {
             }
         });
 
+        let latest_stats = stats.read(cx).clone();
         let mut this = Self {
             config,
             shared_style,
             stats,
+            animations,
+            from_stats: latest_stats.clone(),
+            latest_stats,
+            stats_changed: Instant::now(),
+            stats_moving: false,
+            opened: Instant::now(),
             desktop: None,
             glass: None,
             _subscriptions: subscriptions,
@@ -180,6 +201,25 @@ impl DesktopWidget {
         if config.use_shared_style { self.shared_style.read(cx) } else { config.style.read(cx) }
     }
 
+    /// A new reading came in: glide to it from whatever is on screen right now (which may be
+    /// partway through the previous glide).
+    fn take_new_stats(&mut self, cx: &App) {
+        let shown = self.shown_stats(cx).into_owned();
+        self.latest_stats = self.stats.read(cx).clone();
+        self.stats_changed = Instant::now();
+        self.stats_moving = !self.content(&shown, cx).looks_like(&self.content(&self.latest_stats, cx));
+        self.from_stats = shown;
+    }
+
+    /// The numbers to draw now: a blend while the values animation runs, else the latest reading.
+    fn shown_stats(&self, cx: &App) -> std::borrow::Cow<'_, SystemStats> {
+        let progress = self.stats_moving.then(|| self.animations.read(cx).values.progress(self.stats_changed));
+        match progress.flatten() {
+            Some(t) => std::borrow::Cow::Owned(SystemStats::blend(&self.from_stats, &self.latest_stats, t)),
+            None => std::borrow::Cow::Borrowed(&self.latest_stats),
+        }
+    }
+
     fn restyle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         resize_if_needed(window, self.wanted_size(cx));
         self.update_glass(window, cx);
@@ -190,7 +230,7 @@ impl DesktopWidget {
     fn wanted_size(&self, cx: &App) -> Size<Pixels> {
         let style = self.style(cx);
         let parts = &self.config.read(cx).parts;
-        let rows = self.content(cx).rows.len() as f32;
+        let rows = self.content(&self.latest_stats, cx).rows.len() as f32;
         let mut height = style.height;
         if rows > 0. {
             // GPUI's default line height is 1.618 x the text size.
@@ -238,10 +278,10 @@ impl DesktopWidget {
         cx.notify();
     }
 
-    /// What the widget shows right now, from its widget type (see `src/widgets/`).
-    fn content(&self, cx: &App) -> Content {
+    /// What the widget shows for `stats`, from its widget type (see `src/widgets/`).
+    fn content(&self, stats: &SystemStats, cx: &App) -> Content {
         let config = self.config.read(cx);
-        widget_type(config.kind).content(config, self.stats.read(cx))
+        widget_type(config.kind).content(config, stats)
     }
 }
 
@@ -314,8 +354,16 @@ fn history_graph(graph: Graph, color: Hsla) -> Canvas<()> {
 }
 
 impl Render for DesktopWidget {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Content { label, value, bar, graph, rows } = self.content(cx);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let animations = *self.animations.read(cx);
+        let stats = self.shown_stats(cx);
+        let gliding = matches!(stats, std::borrow::Cow::Owned(_));
+        let Content { label, value, bar, graph, rows } = self.content(&stats, cx);
+        let fade = animations.fade_in.progress(self.opened);
+        // Keep drawing frames until both animations are done.
+        if gliding || fade.is_some() {
+            window.request_animation_frame();
+        }
         let config = self.config.read(cx);
         let (parts, thresholds, show_graph, locked) =
             (config.parts.clone(), config.thresholds, config.show_graph, config.locked);
@@ -410,6 +458,8 @@ impl Render for DesktopWidget {
         let frame = div()
             .size_full()
             .rounded(px(style.corner_radius))
+            // An overshooting curve could go past fully shown, so keep it within 0–1.
+            .opacity(fade.unwrap_or(1.).clamp(0., 1.))
             // Grabbing anywhere drags the window, unless the widget is locked.
             .when(!locked, |frame| frame.window_control_area(WindowControlArea::Drag));
 
@@ -437,6 +487,7 @@ pub fn open(
     config: Entity<WidgetConfig>,
     shared_style: Entity<WidgetStyle>,
     stats: Entity<SystemStats>,
+    animations: Entity<Animations>,
     cx: &mut App,
 ) -> AnyWindowHandle {
     let current = config.read(cx);
@@ -456,7 +507,7 @@ pub fn open(
     // in its `Root`, which paints the theme background and would hide the transparency.
     let handle = cx
         .open_window(options, |window, cx| {
-            cx.new(|cx| DesktopWidget::new(config, shared_style, stats, window, cx))
+            cx.new(|cx| DesktopWidget::new(config, shared_style, stats, animations, window, cx))
         })
         .expect("Failed to open widget");
     // The Win32 calls make Windows send the window messages right away. If GPUI is in the middle

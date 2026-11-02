@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
+use crate::animation::Animations;
 use crate::widget::WidgetStyle;
 use crate::widgets::widget_type;
 
@@ -154,6 +155,8 @@ pub struct Dashboard {
     /// Widgets snap to a grid of `grid_size` (logical pixels) while dragged.
     pub snap_to_grid: bool,
     pub grid_size: f32,
+    /// How values change and widgets appear; every widget window watches it.
+    pub animations: Entity<Animations>,
 }
 
 // What actually goes into the file: plain values, no entities.
@@ -164,11 +167,18 @@ struct DashboardFile {
     widgets: Vec<WidgetFile>,
     snap_to_grid: bool,
     grid_size: f32,
+    animations: Animations,
 }
 
 impl Default for DashboardFile {
     fn default() -> Self {
-        Self { shared_style: WidgetStyle::default(), widgets: Vec::new(), snap_to_grid: false, grid_size: 20. }
+        Self {
+            shared_style: WidgetStyle::default(),
+            widgets: Vec::new(),
+            snap_to_grid: false,
+            grid_size: 20.,
+            animations: Animations::default(),
+        }
     }
 }
 
@@ -287,6 +297,7 @@ impl Dashboard {
             widgets,
             snap_to_grid: file.snap_to_grid,
             grid_size: file.grid_size,
+            animations: cx.new(|_| file.animations),
         }
     }
 
@@ -339,6 +350,7 @@ impl Dashboard {
                 .collect(),
             snap_to_grid: self.snap_to_grid,
             grid_size: self.grid_size,
+            animations: *self.animations.read(cx),
         };
         write_json("dashboard.json", &file)
     }

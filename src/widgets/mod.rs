@@ -25,6 +25,20 @@ pub struct Content {
     pub rows: Vec<Row>,
 }
 
+impl Content {
+    /// Whether `other` would draw the same (bars within a hair), so there's nothing to animate.
+    pub fn looks_like(&self, other: &Content) -> bool {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.002;
+        let same_bar = match (self.bar, other.bar) {
+            (Some(a), Some(b)) => close(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        let same_rows = self.rows.len() == other.rows.len()
+            && self.rows.iter().zip(&other.rows).all(|(a, b)| a.value == b.value && close(a.fill, b.fill));
+        self.label == other.label && self.value == other.value && same_bar && same_rows
+    }
+}
+
 /// One line of a list widget: a name on the left, a value on the right, a bar below.
 pub struct Row {
     pub name: String,

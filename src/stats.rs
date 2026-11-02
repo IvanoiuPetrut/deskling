@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::*;
 use sysinfo::{Components, Disks, Networks, System};
 
+use crate::animation::lerp;
 use crate::battery::{self, Battery};
 
 /// How often the numbers are read.
@@ -45,7 +46,7 @@ pub struct DiskStats {
     pub total: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SystemStats {
     /// 0–100, all cores together.
     pub cpu_usage: f32,
@@ -68,6 +69,33 @@ pub struct SystemStats {
 impl SystemStats {
     pub fn disk(&self, mount: &str) -> Option<&DiskStats> {
         self.disks.iter().find(|disk| disk.mount == mount)
+    }
+
+    /// The numbers `t` of the way from `from` to `to` (past 1 overshoots), for drawing a widget
+    /// while it glides to a new reading. Lists and histories come from `to` as they are; only
+    /// drives and batteries that are in both get their numbers blended.
+    pub fn blend(from: &SystemStats, to: &SystemStats, t: f32) -> SystemStats {
+        let bytes = |from: u64, to: u64| lerp(from as f32, to as f32, t).max(0.) as u64;
+        let mut blended = to.clone();
+        blended.cpu_usage = lerp(from.cpu_usage, to.cpu_usage, t).max(0.);
+        blended.cpu_temperature = match (from.cpu_temperature, to.cpu_temperature) {
+            (Some(from), Some(to)) => Some(lerp(from, to, t)),
+            (_, to) => to,
+        };
+        blended.ram_used = bytes(from.ram_used, to.ram_used);
+        blended.net_down = lerp(from.net_down, to.net_down, t).max(0.);
+        blended.net_up = lerp(from.net_up, to.net_up, t).max(0.);
+        for disk in &mut blended.disks {
+            if let Some(old) = from.disk(&disk.mount) {
+                disk.free = bytes(old.free, disk.free).min(disk.total);
+            }
+        }
+        for battery in &mut blended.batteries {
+            if let Some(old) = from.batteries.iter().find(|old| old.name == battery.name) {
+                battery.level = lerp(old.level as f32, battery.level as f32, t).round().clamp(0., 100.) as u8;
+            }
+        }
+        blended
     }
 }
 
