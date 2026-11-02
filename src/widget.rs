@@ -170,7 +170,7 @@ impl DesktopWidget {
             // also need to grow or shrink when a device comes or goes.
             cx.observe_in(&stats, window, |this, _, window, cx| {
                 this.take_new_stats(cx);
-                resize_if_needed(window, this.wanted_size(cx));
+                resize_if_needed(window, this.wanted_size(cx), cx);
                 cx.notify();
             }),
             // Dragged or resized: remember where, and what's behind it changed.
@@ -243,7 +243,7 @@ impl DesktopWidget {
 
     fn restyle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         watch_weather(self.config.read(cx));
-        resize_if_needed(window, self.wanted_size(cx));
+        resize_if_needed(window, self.wanted_size(cx), cx);
         self.update_glass(window, cx);
     }
 
@@ -388,11 +388,11 @@ fn watch_weather(config: &WidgetConfig) {
 
 /// Resizes the window unless it's already about `wanted` (sizes round to whole device pixels,
 /// so an exact compare could resize again on every update).
-fn resize_if_needed(window: &mut Window, wanted: Size<Pixels>) {
+fn resize_if_needed(window: &mut Window, wanted: Size<Pixels>, cx: &App) {
     let current = window.viewport_size();
     let off = |a: Pixels, b: Pixels| f32::from(a - b).abs() > 1.;
     if off(current.width, wanted.width) || off(current.height, wanted.height) {
-        window.resize(wanted);
+        win32::resize(window, wanted, cx);
     }
 }
 
@@ -738,7 +738,7 @@ mod win32 {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
-    use gpui_kit::Window;
+    use gpui_kit::{App, Pixels, Size, Window};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
@@ -857,6 +857,25 @@ mod win32 {
             ReleaseDC(None, screen);
             snapshot
         }
+    }
+
+    /// Makes the window `size` big. Not GPUI's `window.resize`: that adds the frame GPUI expects
+    /// around the content, which the widgets don't have (see WM_NCCALCSIZE below), so the window
+    /// came out 16 x 8 px too big and was resized again every second. It also leaves out
+    /// SWP_NOACTIVATE, so each of those resizes took the focus from the dashboard.
+    pub fn resize(window: &Window, size: Size<Pixels>, cx: &App) {
+        let Some(hwnd) = raw_hwnd(window) else { return };
+        let scale = window.scale_factor();
+        let width = (f32::from(size.width) * scale).round() as i32;
+        let height = (f32::from(size.height) * scale).round() as i32;
+        // Later, like GPUI does: Windows sends WM_SIZE right away, which GPUI can't take
+        // in the middle of an update.
+        cx.foreground_executor()
+            .spawn(async move {
+                let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
+                let _ = unsafe { SetWindowPos(HWND(hwnd as *mut _), None, 0, 0, width, height, flags) };
+            })
+            .detach();
     }
 
     /// The window's Win32 handle as a plain number, so it can be used outside a GPUI update.
@@ -1103,12 +1122,16 @@ mod win32 {
 /// Other platforms: no desktop pinning and no glass (there's no desktop picture to blur).
 #[cfg(not(windows))]
 mod win32 {
-    use gpui_kit::Window;
+    use gpui_kit::{App, Pixels, Size, Window};
 
     use crate::glass::{Snapshot, ScreenRect};
 
     pub fn capture_desktop() -> Option<Snapshot> {
         None
+    }
+
+    pub fn resize(window: &mut Window, size: Size<Pixels>, _: &App) {
+        window.resize(size);
     }
 
     pub fn window_screen_rect(_: &Window) -> Option<ScreenRect> {
