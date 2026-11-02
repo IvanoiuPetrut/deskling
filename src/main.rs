@@ -9,6 +9,7 @@ mod battery;
 mod dashboard;
 mod dashboard_view;
 mod glass;
+mod media;
 mod motion_settings;
 mod stats;
 mod theme;

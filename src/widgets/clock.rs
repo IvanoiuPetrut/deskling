@@ -31,7 +31,8 @@ impl WidgetType for Clock {
             label = format!("{label} · {}", utc_name(hours));
         }
 
-        Content { label, value: now.format(time_pattern).to_string(), bar: None, graph: None, rows: Vec::new() }
+        let value = now.format(time_pattern).to_string();
+        Content { label, value, bar: None, graph: None, rows: Vec::new(), player: None }
     }
 }
 

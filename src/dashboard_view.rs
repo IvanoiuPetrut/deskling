@@ -395,27 +395,36 @@ impl DashboardView {
         let (enabled, use_shared_style, locked) = (config.enabled, config.use_shared_style, config.locked);
         let (show_temperature, show_graph, disk) = (config.show_temperature, config.show_graph, config.disk.clone());
         let (parts, thresholds, clock) = (config.parts.clone(), config.thresholds, config.clock);
-        let battery = config.battery.clone();
+        let (battery, media) = (config.battery.clone(), config.media);
         let panel = &self.widget_panels[index];
         let has_graph = widget_type(kind).has_graph();
         // Widgets with a usage % (shown as their bar) can be colored by it. Batteries warn when low.
         let has_usage = matches!(kind, WidgetKind::Cpu | WidgetKind::Ram | WidgetKind::Disk | WidgetKind::Battery);
         let low = widget_type(kind).warns_when_low();
 
+        // Now Playing's label is the artist and its value the title (a custom label would hide the artist).
+        let player = kind == WidgetKind::NowPlaying;
+        let (show_label, show_value, show_bar) = match player {
+            true => ("Show artist", "Show title", "Show progress bar"),
+            false => ("Show label", "Show value", "Show bar / graph"),
+        };
+
         // --- Content ---
         let content = section("Content")
-            .child(div().flex().flex_col().gap_1().child("Label").child(Input::new(&panel.label)))
+            .when(!player, |content| {
+                content.child(div().flex().flex_col().gap_1().child("Label").child(Input::new(&panel.label)))
+            })
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap_4()
-                    .child(self.checkbox("show-label", "Show label", parts.show_label, index, |c, v| c.parts.show_label = v, cx))
-                    .child(self.checkbox("show-value", "Show value", parts.show_value, index, |c, v| c.parts.show_value = v, cx))
+                    .child(self.checkbox("show-label", show_label, parts.show_label, index, |c, v| c.parts.show_label = v, cx))
+                    .child(self.checkbox("show-value", show_value, parts.show_value, index, |c, v| c.parts.show_value = v, cx))
                     .when(kind != WidgetKind::Clock, |row| {
                         row.child(self.checkbox(
                             "show-bar",
-                            "Show bar / graph",
+                            show_bar,
                             parts.show_bar,
                             index,
                             |c, v| c.parts.show_bar = v,
@@ -484,6 +493,29 @@ impl DashboardView {
                 .when(clock.utc_offset.is_some(), |clock| {
                     clock.child(labeled_slider(format!("Time zone: {}", utc_name(offset)), &panel.utc_offset))
                 })
+        });
+
+        // --- Media ---
+        let media_options = player.then(|| {
+            section("Media")
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_4()
+                        .child(self.checkbox("show-art", "Show cover art", media.show_art, index, |c, v| c.media.show_art = v, cx))
+                        .child(self.checkbox(
+                            "show-controls",
+                            "Show play/pause and skip buttons",
+                            media.show_controls,
+                            index,
+                            |c, v| c.media.show_controls = v,
+                            cx,
+                        )),
+                )
+                .child(div().text_sm().opacity(0.7).child(
+                    "Shows what Windows shows in its media pop-up (next to the volume overlay): Spotify,                      browsers, Media Player and most other players. When several apps are playing, Windows                      picks one. Buttons the app doesn't allow right now (like \"previous\" on the first                      track) are faded. The widget is at least wide enough for the cover and the title.",
+                ))
         });
 
         // --- Batteries ---
@@ -574,6 +606,7 @@ impl DashboardView {
             )
             .child(content)
             .children(clock_options)
+            .children(media_options)
             .children(battery_options)
             .children(usage_colors)
             .child(style)

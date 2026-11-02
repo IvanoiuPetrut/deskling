@@ -6,15 +6,21 @@ mod clock;
 mod cpu;
 mod disk;
 mod network;
+mod now_playing;
 mod ram;
 
 pub use clock::utc_name;
+
+use std::sync::Arc;
+
+use gpui_kit::RenderImage;
 
 use crate::dashboard::{WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
 
 /// What a widget shows, top to bottom: a small label, the big value, then a bar or a graph.
-/// A widget with `rows` (one per battery, say) shows those under the label instead.
+/// A widget with `rows` (one per battery, say) shows those under the label instead, and one
+/// with a `player` (Now Playing) puts its cover art beside the text and buttons under it.
 pub struct Content {
     pub label: String,
     pub value: String,
@@ -23,6 +29,7 @@ pub struct Content {
     /// Recent values for the history graph (drawn instead of the bar when the graph is on).
     pub graph: Option<Graph>,
     pub rows: Vec<Row>,
+    pub player: Option<Player>,
 }
 
 impl Content {
@@ -47,6 +54,19 @@ pub struct Row {
     pub fill: f32,
     /// Drawn faded, e.g. a device that's switched off (its value is old).
     pub dimmed: bool,
+}
+
+/// The Now Playing widget's extras. Its label is the artist, the value the title and the bar
+/// how far into the track it is.
+pub struct Player {
+    pub art: Option<Arc<RenderImage>>,
+    /// Leave room for the cover even while there's none (yet), so the text doesn't jump.
+    pub show_art: bool,
+    pub show_controls: bool,
+    pub playing: bool,
+    pub can_play_pause: bool,
+    pub can_previous: bool,
+    pub can_next: bool,
 }
 
 /// Values oldest first; `max` is the value that reaches the top of the graph.
@@ -83,6 +103,7 @@ pub fn widget_type(kind: WidgetKind) -> &'static dyn WidgetType {
         WidgetKind::Disk => &disk::Disk,
         WidgetKind::Network => &network::Network,
         WidgetKind::Battery => &battery::Batteries,
+        WidgetKind::NowPlaying => &now_playing::NowPlaying,
     }
 }
 

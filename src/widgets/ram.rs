@@ -17,6 +17,7 @@ impl WidgetType for Ram {
             bar: Some(used),
             graph: Some(Graph { points: stats.ram_history.to_vec(), max: 100. }),
             rows: Vec::new(),
+            player: None,
         }
     }
 

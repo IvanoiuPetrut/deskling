@@ -19,16 +19,18 @@ pub enum WidgetKind {
     Disk,
     Network,
     Battery,
+    NowPlaying,
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 6] = [
+    pub const ALL: [WidgetKind; 7] = [
         WidgetKind::Clock,
         WidgetKind::Cpu,
         WidgetKind::Ram,
         WidgetKind::Disk,
         WidgetKind::Network,
         WidgetKind::Battery,
+        WidgetKind::NowPlaying,
     ];
 
     pub fn name(self) -> &'static str {
@@ -79,6 +81,21 @@ pub struct BatteryOptions {
     pub names: BTreeMap<String, String>,
     /// Also list paired devices that are switched off, faded, with their last known level.
     pub show_disconnected: bool,
+}
+
+/// Now Playing widget: which parts to draw besides the text.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaOptions {
+    pub show_art: bool,
+    /// Previous, play/pause and next buttons.
+    pub show_controls: bool,
+}
+
+impl Default for MediaOptions {
+    fn default() -> Self {
+        Self { show_art: true, show_controls: true }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -145,6 +162,7 @@ pub struct WidgetConfig {
     pub thresholds: Thresholds,
     pub clock: ClockOptions,
     pub battery: BatteryOptions,
+    pub media: MediaOptions,
     /// Can't be dragged.
     pub locked: bool,
 }
@@ -198,6 +216,7 @@ struct WidgetFile {
     thresholds: Thresholds,
     clock: ClockOptions,
     battery: BatteryOptions,
+    media: MediaOptions,
     locked: bool,
 }
 
@@ -217,6 +236,7 @@ impl Default for WidgetFile {
             thresholds: Thresholds::default(),
             clock: ClockOptions::default(),
             battery: BatteryOptions::default(),
+            media: MediaOptions::default(),
             locked: false,
         }
     }
@@ -237,6 +257,7 @@ impl WidgetFile {
             thresholds: self.thresholds,
             clock: self.clock,
             battery: self.battery,
+            media: self.media,
             locked: self.locked,
         }
     }
@@ -344,6 +365,7 @@ impl Dashboard {
                         thresholds: widget.thresholds,
                         clock: widget.clock,
                         battery: widget.battery.clone(),
+                        media: widget.media,
                         locked: widget.locked,
                     }
                 })

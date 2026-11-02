@@ -30,7 +30,7 @@ impl WidgetType for Batteries {
 
         let value = if rows.is_empty() { "–".into() } else { String::new() };
         let label = if rows.is_empty() { "No batteries connected".into() } else { "Batteries".into() };
-        Content { label, value, bar: None, graph: None, rows }
+        Content { label, value, bar: None, graph: None, rows, player: None }
     }
 
     fn warns_when_low(&self) -> bool {

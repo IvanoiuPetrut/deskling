@@ -1,7 +1,7 @@
 # Deskling
 
 Desktop widgets for Windows, written in Rust with [GPUI](https://www.gpui.rs/) while learning both: (clock, CPU, RAM, disk
-space, network, batteries), similar to Rainmeter skins, with a dashboard window to add, remove and style them,
+space, network, batteries, now playing), similar to Rainmeter skins, with a dashboard window to add, remove and style them,
 and a tray icon.
 
 ## Requirements
@@ -53,10 +53,11 @@ src/
 ├── widget.rs           the desktop widget window, its WidgetStyle, graphs, and the Windows pinning code
 ├── widget_settings.rs  the style editor: theme picker, sliders, border type and color pickers
 ├── theme.rs            built-in themes, the user's themes (themes.json), import/export, previews
+├── media.rs            reads what's playing (title, artist, cover, position) and sends play/pause/skip (Windows)
 ├── glass.rs            the glass effect: crops and blurs a picture of the desktop behind a widget
 └── widgets/            one file per widget type, each implementing the `WidgetType` trait
     ├── mod.rs          the trait and the kind → type lookup
-    ├── clock.rs  cpu.rs  ram.rs  disk.rs  network.rs  battery.rs
+    ├── clock.rs  cpu.rs  ram.rs  disk.rs  network.rs  battery.rs  now_playing.rs
 ```
 
 ## The dashboard
@@ -74,6 +75,7 @@ adds a new one (several of the same type are fine, e.g. two Disk widgets for C: 
 | Disk space | free space on one drive | which drive |
 | Network | download and upload speed (all adapters) | history graph |
 | Batteries | one row per battery: this PC's, and Bluetooth mice, keyboards, headsets | which devices, your own names, switched-off devices |
+| Now playing | cover art, title, artist, progress, and previous / play-pause / next buttons | cover art, buttons |
 
 The **history graph** replaces the usage bar with a small chart of the last minute.
 
@@ -92,6 +94,13 @@ grows taller to fit every row. Devices that are switched off are left out unless
 Its **Low battery** colors start on (warning at 30% or less, critical at 15% or less). A device
 paired twice is listed once, using the connected entry. Devices on their own USB receiver (like
 Logitech Lightspeed) don't report to Windows, so they can't be listed.
+
+The **Now playing** widget shows what Windows shows in its media pop-up (next to the volume
+overlay): Spotify, browsers, Media Player and most other players. Its buttons work like that
+pop-up's; a button the app doesn't allow right now (like "previous" on the first track) is faded.
+When several apps are playing, Windows picks which one. The progress bar only shows when the app
+reports the track's length (live streams don't). The widget is at least wide enough for the cover
+and the title, whatever the style's width; its buttons can be clicked even when it can be dragged.
 
 The **Layout** page has **Snap to grid** (widgets move in grid steps while you drag them, grid size
 5–100 px) and **Lock all / Unlock all**.

@@ -9,6 +9,7 @@ use sysinfo::{Components, Disks, Networks, System};
 
 use crate::animation::lerp;
 use crate::battery::{self, Battery};
+use crate::media::{self, NowPlaying};
 
 /// How often the numbers are read.
 const TICK: Duration = Duration::from_secs(1);
@@ -60,6 +61,8 @@ pub struct SystemStats {
     pub net_up: f32,
     /// This PC's battery and the devices that report one.
     pub batteries: Vec<Battery>,
+    /// What's playing, for the Now Playing widget (read on a thread of its own, see `media.rs`).
+    pub media: Option<NowPlaying>,
     /// CPU and RAM in %, network in bytes per second.
     pub cpu_history: History,
     pub ram_history: History,
@@ -200,6 +203,7 @@ pub fn start(cx: &mut App) -> Entity<SystemStats> {
                 if batteries {
                     stats.batteries = fresh.batteries.clone();
                 }
+                stats.media = media::latest();
                 cx.notify();
             });
             if updated.is_err() {

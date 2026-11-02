@@ -21,6 +21,7 @@ impl WidgetType for Cpu {
             bar: Some(stats.cpu_usage / 100.),
             graph: Some(Graph { points: stats.cpu_history.to_vec(), max: 100. }),
             rows: Vec::new(),
+            player: None,
         }
     }
 

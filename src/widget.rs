@@ -8,16 +8,33 @@ use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
 use crate::animation::Animations;
-use crate::dashboard::{Thresholds, WidgetConfig};
+use crate::dashboard::{Thresholds, WidgetConfig, WidgetKind};
 use crate::glass::{self, ScreenRect};
+use crate::media::{self, Command};
 use crate::stats::{HISTORY_LEN, SystemStats};
-use crate::widgets::{Content, Graph, widget_type};
+use crate::widgets::{Content, Graph, Player, widget_type};
 
 /// How often the desktop picture behind the glass is retaken, to catch wallpaper/icon changes.
 const GLASS_REFRESH: Duration = Duration::from_secs(10);
 /// Rows of a list widget (batteries): text size in parts of the font size, and line height.
 const ROW_FONT: f32 = 0.6;
 const ROW_LINE: f32 = 1.3;
+/// Now Playing: the title's text size and the play button's icon size, in parts of the font size.
+const PLAYER_TITLE: f32 = 0.7;
+const PLAYER_BUTTON: f32 = 0.6;
+/// Now Playing is at least this many font sizes wide, to fit the cover beside the title.
+const PLAYER_WIDTH: f32 = 12.5;
+/// After a media button press, look again this long after the click (a skip takes the app a
+/// moment) instead of waiting for the next reading.
+const MEDIA_REFRESH: Duration = Duration::from_millis(700);
+
+// Media button icons. GPUI draws an SVG in one color (the text color), so only the shapes matter.
+const PLAY_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7 4.6v14.8a1 1 0 0 0 1.53.85l11.8-7.4a1 1 0 0 0 0-1.7L8.53 3.75A1 1 0 0 0 7 4.6z"/></svg>"#;
+const PAUSE_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="5.5" y="4" width="4.5" height="16" rx="1.2"/><rect x="14" y="4" width="4.5" height="16" rx="1.2"/></svg>"#;
+const NEXT_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 5.3v13.4a1 1 0 0 0 1.55.84l9.9-6.7a1 1 0 0 0 0-1.68l-9.9-6.7A1 1 0 0 0 4 5.3z"/><rect x="17" y="4.5" width="3" height="15" rx="1"/></svg>"#;
+const PREVIOUS_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 5.3v13.4a1 1 0 0 1-1.55.84l-9.9-6.7a1 1 0 0 1 0-1.68l9.9-6.7A1 1 0 0 1 20 5.3z"/><rect x="4" y="4.5" width="3" height="15" rx="1"/></svg>"#;
+/// Shown instead of the cover while there's none.
+const NOTE_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="6.5" cy="17.5" r="3.5"/><circle cx="17.5" cy="15.5" r="3.5"/><path d="M8 17.5V6.3a1 1 0 0 1 .8-1l11-2.2A1 1 0 0 1 21 4.1v11.4h-2V7.4l-9 1.8v8.3z"/></svg>"#;
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BorderKind {
@@ -127,6 +144,8 @@ struct DesktopWidget {
     desktop: Option<Rc<glass::Snapshot>>,
     /// The blurred background currently shown, if the glass effect is on.
     glass: Option<Arc<RenderImage>>,
+    /// Now Playing: the cover art last drawn, so its GPU memory can be freed when it changes.
+    art: Option<Arc<RenderImage>>,
     _subscriptions: Vec<Subscription>,
     _refresh: Task<()>,
 }
@@ -188,6 +207,7 @@ impl DesktopWidget {
             opened: Instant::now(),
             desktop: None,
             glass: None,
+            art: None,
             _subscriptions: subscriptions,
             _refresh: refresh,
         };
@@ -229,20 +249,34 @@ impl DesktopWidget {
     /// follow the layout in `render`, with a few pixels to spare.
     fn wanted_size(&self, cx: &App) -> Size<Pixels> {
         let style = self.style(cx);
-        let parts = &self.config.read(cx).parts;
+        let config = self.config.read(cx);
+        let parts = &config.parts;
         let rows = self.content(&self.latest_stats, cx).rows.len() as f32;
-        let mut height = style.height;
+        let (mut width, mut height) = (style.width, style.height);
+        let border = if style.border == BorderKind::None { 0. } else { 2. * style.border_width };
+        if config.kind == WidgetKind::NowPlaying {
+            width = width.max(style.font_size * PLAYER_WIDTH);
+            // Title and artist (4 px apart, `gap_1`) in the middle, with room above for the buttons
+            // and below for the bar: as much below as above, since the titles stay centered.
+            let title = if parts.show_value { style.font_size * PLAYER_TITLE * 1.618 } else { 0. };
+            let artist = if parts.show_label { style.font_size * style.label_size / 100. * 1.618 } else { 0. };
+            let gap = if parts.show_value && parts.show_label { 4. } else { 0. };
+            let buttons = if config.media.show_controls { style.font_size * PLAYER_BUTTON * 1.4 } else { 0. };
+            let bar = if parts.show_bar { 3. } else { 0. };
+            let edge = buttons.max(bar);
+            let edge = if edge > 0. { edge + 4. } else { 0. };
+            height = height.max(2. * style.padding + border + title + gap + artist + 2. * edge + 4.);
+        }
         if rows > 0. {
             // GPUI's default line height is 1.618 x the text size.
             let label = if parts.show_label { style.font_size * style.label_size / 100. * 1.618 } else { 0. };
             let bar = if parts.show_bar { 2. + 3. } else { 0. };
             let row = style.font_size * ROW_FONT * ROW_LINE + bar;
-            let border = if style.border == BorderKind::None { 0. } else { 2. * style.border_width };
             // Label and rows are 4 px apart (`gap_1`).
             let needed = 2. * style.padding + border + label + rows * (row + 4.) + 6.;
             height = height.max(needed);
         }
-        size(px(style.width), px(height))
+        size(px(width), px(height))
     }
 
     /// Rebuilds the blurred background for the widget's current position, size and style.
@@ -276,6 +310,52 @@ impl DesktopWidget {
             window.drop_image(old).ok();
         }
         cx.notify();
+    }
+
+    /// Sends a media button press, and shows the result without waiting for the next reading.
+    fn send_media(&mut self, command: Command, cx: &mut Context<Self>) {
+        fn refresh(stats: &mut SystemStats, cx: &mut Context<SystemStats>) {
+            stats.media = media::latest();
+            cx.notify();
+        }
+        media::send(command);
+        self.stats.update(cx, refresh);
+        let stats = self.stats.downgrade();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(MEDIA_REFRESH).await;
+            stats.update(cx, refresh).ok();
+        })
+        .detach();
+    }
+
+    /// Previous, play/pause and next for the Now Playing widget, with the play icon `size` big.
+    /// Buttons the app doesn't allow right now are faded and can't be clicked.
+    fn media_buttons(&self, player: &Player, size: f32, color: Hsla, cx: &Context<Self>) -> Div {
+        let button = |id: &'static str, icon: &'static [u8], size: f32, enabled: bool, command: Command| {
+            let button = div()
+                .id(id)
+                .flex_none()
+                .p(px(size * 0.2))
+                .rounded_full()
+                .child(svg().data(icon).size(px(size)).text_color(color));
+            match enabled {
+                // `occlude`: the button gets the click, not the drag area under it.
+                true => button
+                    .occlude()
+                    .cursor_pointer()
+                    .hover(|button| button.bg(color.opacity(0.15)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.send_media(command, cx))),
+                false => button.opacity(0.35),
+            }
+        };
+        let play = if player.playing { PAUSE_ICON } else { PLAY_ICON };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(size * 0.4))
+            .child(button("previous", PREVIOUS_ICON, size * 0.8, player.can_previous, Command::Previous))
+            .child(button("play-pause", play, size, player.can_play_pause, Command::PlayPause))
+            .child(button("next", NEXT_ICON, size * 0.8, player.can_next, Command::Next))
     }
 
     /// What the widget shows for `stats`, from its widget type (see `src/widgets/`).
@@ -358,11 +438,20 @@ impl Render for DesktopWidget {
         let animations = *self.animations.read(cx);
         let stats = self.shown_stats(cx);
         let gliding = matches!(stats, std::borrow::Cow::Owned(_));
-        let Content { label, value, bar, graph, rows } = self.content(&stats, cx);
+        let Content { label, value, bar, graph, rows, player } = self.content(&stats, cx);
         let fade = animations.fade_in.progress(self.opened);
         // Keep drawing frames until both animations are done.
         if gliding || fade.is_some() {
             window.request_animation_frame();
+        }
+        // New cover art: free the old one's GPU memory.
+        let art = player.as_ref().and_then(|player| player.art.clone());
+        let same_art = match (&art, &self.art) {
+            (Some(new), Some(old)) => Arc::ptr_eq(new, old),
+            (new, old) => new.is_none() && old.is_none(),
+        };
+        if !same_art && let Some(old) = std::mem::replace(&mut self.art, art) {
+            window.drop_image(old).ok();
         }
         let config = self.config.read(cx);
         let (parts, thresholds, show_graph, locked) =
@@ -384,44 +473,111 @@ impl Render for DesktopWidget {
             _ => (bar, None),
         };
 
-        let text = div()
-            .relative()
-            .w_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .when(parts.show_label, |text| {
-                text.child(
-                    div().text_size(px(style.font_size * style.label_size / 100.)).opacity(0.8).child(label),
-                )
-            })
-            .when(rows.is_empty() && parts.show_value, |text| {
-                text.child(div().when_some(level_color, |value, color| value.text_color(color)).child(value))
-            })
-            .when(rows.is_empty() && parts.show_bar, |text| {
-                text.children(bar.map(|fill| usage_bar(fill, accent, 4.).w(relative(0.8))))
-                .children(graph.map(|graph| {
-                    div().w(relative(0.85)).h(px(style.font_size * 1.1)).child(history_graph(graph, accent).size_full())
-                }))
-            })
-            .children(rows.into_iter().map(|row| {
-                let color = threshold_color(row.fill * 100., thresholds, warns_when_low, &style);
-                let name = div().flex_1().min_w_0().truncate().child(row.name);
-                let value = div().flex_none().when_some(color, |value, color| value.text_color(color)).child(row.value);
-                div()
-                    .w(relative(0.9))
+        let text = match player {
+            // Now Playing: the cover on the left; title, artist, progress bar and buttons beside it.
+            Some(player) => {
+                let border = if style.border == BorderKind::None { 0. } else { 2. * style.border_width };
+                let cover_size = (f32::from(window.viewport_size().height) - 2. * style.padding - border).max(0.);
+                // Follows the widget's own corners, the padding further in.
+                let cover_radius = (style.corner_radius - style.padding).max(3.);
+                let cover = div()
+                    .flex_none()
+                    .size(px(cover_size))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(cover_radius))
+                    .bg(style.text_color.opacity(0.12))
+                    .map(|cover| match player.art.clone() {
+                        Some(art) => {
+                            cover.child(img(art).size_full().object_fit(ObjectFit::Cover).rounded(px(cover_radius)))
+                        }
+                        None => cover.child(
+                            svg().data(NOTE_ICON).size(px(cover_size * 0.4)).text_color(style.text_color.opacity(0.5)),
+                        ),
+                    });
+                let button_size = style.font_size * PLAYER_BUTTON;
+                // Title and artist stay in the middle; the buttons sit in the top-right corner and
+                // the progress bar along the bottom, both laid over the column so they don't move it.
+                let titles = div()
+                    .w_full()
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
-                    .text_size(px(style.font_size * ROW_FONT))
-                    .line_height(relative(ROW_LINE))
-                    .when(row.dimmed, |row| row.opacity(0.45))
-                    .child(div().flex().gap_2().child(name).when(parts.show_value, |line| line.child(value)))
-                    .when(parts.show_bar, |line| {
-                        line.child(usage_bar(row.fill, color.unwrap_or(style.accent_color), 3.).w_full())
+                    .gap_1()
+                    .when(parts.show_value, |titles| {
+                        titles.child(div().truncate().text_size(px(style.font_size * PLAYER_TITLE)).child(value))
                     })
-            }));
+                    .when(parts.show_label, |titles| {
+                        let size = style.font_size * style.label_size / 100.;
+                        titles.child(div().truncate().text_size(px(size)).opacity(0.8).child(label))
+                    });
+                let details = div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(titles)
+                    .when(player.show_controls, |details| {
+                        // Pushed out by the buttons' padding, so the icons line up with the corner.
+                        let buttons = self.media_buttons(&player, button_size, style.text_color, cx);
+                        let inset = px(-button_size * 0.2);
+                        details.child(buttons.absolute().top(inset).right(inset))
+                    })
+                    .when(parts.show_bar, |details| {
+                        details.children(
+                            bar.map(|fill| usage_bar(fill, accent, 3.).absolute().bottom_0().left_0().w_full()),
+                        )
+                    });
+                div()
+                    .relative()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(style.padding.max(6.)))
+                    .when(player.show_art, |row| row.child(cover))
+                    .child(details)
+            }
+            None => div()
+                .relative()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .when(parts.show_label, |text| {
+                    text.child(
+                        div().text_size(px(style.font_size * style.label_size / 100.)).opacity(0.8).child(label),
+                    )
+                })
+                .when(rows.is_empty() && parts.show_value, |text| {
+                    text.child(div().when_some(level_color, |value, color| value.text_color(color)).child(value))
+                })
+                .when(rows.is_empty() && parts.show_bar, |text| {
+                    text.children(bar.map(|fill| usage_bar(fill, accent, 4.).w(relative(0.8))))
+                    .children(graph.map(|graph| {
+                        div().w(relative(0.85)).h(px(style.font_size * 1.1)).child(history_graph(graph, accent).size_full())
+                    }))
+                })
+                .children(rows.into_iter().map(|row| {
+                    let color = threshold_color(row.fill * 100., thresholds, warns_when_low, &style);
+                    let name = div().flex_1().min_w_0().truncate().child(row.name);
+                    let value = div().flex_none().when_some(color, |value, color| value.text_color(color)).child(row.value);
+                    div()
+                        .w(relative(0.9))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .text_size(px(style.font_size * ROW_FONT))
+                        .line_height(relative(ROW_LINE))
+                        .when(row.dimmed, |row| row.opacity(0.45))
+                        .child(div().flex().gap_2().child(name).when(parts.show_value, |line| line.child(value)))
+                        .when(parts.show_bar, |line| {
+                            line.child(usage_bar(row.fill, color.unwrap_or(style.accent_color), 3.).w_full())
+                        })
+                })),
+        };
 
         // Layers, back to front: blurred desktop, tint (background color + opacity), text.
         let content = |radius: f32| {
@@ -491,6 +647,9 @@ pub fn open(
     cx: &mut App,
 ) -> AnyWindowHandle {
     let current = config.read(cx);
+    if current.kind == WidgetKind::NowPlaying {
+        media::start();
+    }
     let style = if current.use_shared_style { shared_style.read(cx) } else { current.style.read(cx) };
     let bounds = Bounds::new(current.position, size(px(style.width), px(style.height)));
     let options = WindowOptions {
