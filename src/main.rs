@@ -48,10 +48,15 @@ fn main() {
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some(APP_NAME.into()), ..Default::default() }),
+            // No Windows caption bar: the dashboard draws its own (see `DashboardView::render`).
+            // The title still names the window in the taskbar and Alt+Tab.
+            titlebar: Some(TitlebarOptions {
+                title: Some(APP_NAME.into()),
+                ..component::TitleBar::title_bar_options()
+            }),
             // Without a tray icon there'd be no way to bring a hidden dashboard back.
             show: !(hidden && has_tray),
-            ..Default::default()
+            ..component::TitleBar::window_options()
         };
         let (dashboard_window, _) = open_window(options, cx, |window, cx| {
             cx.new(|cx| DashboardView::new(dashboard, stats, has_tray, window, cx))

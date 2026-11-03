@@ -9,6 +9,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::TitleBar;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -1359,10 +1360,15 @@ impl Render for DashboardView {
             })
             .child(Button::new("save").primary().label("Save").on_click(cx.listener(|this, _, _, cx| this.save(cx))));
 
+        // Replaces the Windows caption bar: plain white, with only the window buttons (the name
+        // is right below, in the header). Dragging it moves the window.
+        let title_bar = TitleBar::new().bg(white()).border_color(transparent_black());
+
         div()
             .size_full()
             .flex()
             .flex_col()
+            .child(title_bar)
             .child(header)
             .child(
                 div()
