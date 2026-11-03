@@ -18,9 +18,10 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GetCursorPos,
-    HWND_MESSAGE, IDI_APPLICATION, LoadIconW, MF_STRING, RegisterClassW, SW_HIDE, SW_SHOW,
-    SetForegroundWindow, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    GetSystemMetrics, HICON, HWND_MESSAGE, IDI_APPLICATION, IMAGE_ICON, LR_SHARED, LoadIconW, LoadImageW,
+    MF_STRING, RegisterClassW, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_LBUTTONUP,
+    WM_RBUTTONUP, WNDCLASSW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -78,7 +79,7 @@ impl Tray {
             let mut icon = icon_data(window);
             icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             icon.uCallbackMessage = TRAY_MESSAGE;
-            icon.hIcon = LoadIconW(None, IDI_APPLICATION).ok()?;
+            icon.hIcon = app_icon(instance.into()).or_else(|| LoadIconW(None, IDI_APPLICATION).ok())?;
             let tip: Vec<u16> = crate::APP_NAME.encode_utf16().collect();
             icon.szTip[..tip.len()].copy_from_slice(&tip);
             Shell_NotifyIconW(NIM_ADD, &icon).ok().ok()?;
@@ -93,6 +94,16 @@ impl Drop for Tray {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &icon_data(self.window));
         }
+    }
+}
+
+/// The app icon that build.rs puts into the exe (resource number 1), at the tray's size for
+/// this screen's scaling, so Windows picks the sharp hand-drawn size instead of shrinking a big one.
+unsafe fn app_icon(instance: windows::Win32::Foundation::HINSTANCE) -> Option<HICON> {
+    unsafe {
+        let (width, height) = (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+        let handle = LoadImageW(Some(instance), PCWSTR(1 as _), IMAGE_ICON, width, height, LR_SHARED).ok()?;
+        Some(HICON(handle.0))
     }
 }
 

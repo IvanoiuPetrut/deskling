@@ -43,3 +43,6 @@ windows = { version = "0.62.2", features = [
 # requests it whenever debug assertions are on. Disable them for that crate only.
 [profile.dev.package.gpui-pre-windows]
 debug-assertions = false
+
+[build-dependencies]
+winresource = "0.1.34"

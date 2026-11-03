@@ -43,6 +43,11 @@ cargo run -- --hidden
 
 ```
 Cargo.toml      dependencies and build settings (like package.json)
+build.rs        puts the app icon into deskling.exe (Windows)
+assets/
+├── icon.ico        the app icon, every size Windows uses (16–256 px)
+├── icon.png        the same icon at 256 px
+└── make_icon.py    draws both; run it again after changing the icon (needs Pillow)
 src/
 ├── main.rs             entry point: stats reader, dashboard window, tray icon
 ├── battery.rs          reads this PC's battery and Bluetooth devices' battery levels (Windows)
