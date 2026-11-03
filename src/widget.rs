@@ -8,7 +8,7 @@ use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
 use crate::animation::Animations;
-use crate::dashboard::{Thresholds, WidgetConfig, WidgetKind};
+use crate::dashboard::{GraphStyle, Thresholds, WidgetConfig, WidgetKind};
 use crate::glass::{self, ScreenRect};
 use crate::media::{self, Command};
 use crate::stats::{HISTORY_LEN, SystemStats};
@@ -416,8 +416,61 @@ fn usage_bar(fill: f32, color: Hsla, height: f32) -> Div {
         .child(div().h_full().w(relative(fill.clamp(0., 1.))).rounded_full().bg(color))
 }
 
+/// Heat graph colors, by height in the graph (0.0 = bottom, 1.0 = top): green, yellow, then the
+/// style's warning and critical colors.
+fn heat_stops(style: &WidgetStyle) -> [(f32, Hsla); 4] {
+    [(0., rgb(0x6fd35b).into()), (0.45, rgb(0xf2df4b).into()), (0.7, style.warning_color), (1., style.critical_color)]
+}
+
+/// The heat color at height `t`, mixed between the two stops around it.
+fn heat_color(stops: &[(f32, Hsla)], t: f32) -> Hsla {
+    let t = t.clamp(0., 1.);
+    let i = stops.windows(2).position(|pair| t <= pair[1].0).unwrap_or(stops.len() - 2);
+    let ((t0, a), (t1, b)) = (stops[i], stops[i + 1]);
+    let (a, b, k) = (Rgba::from(a), Rgba::from(b), (t - t0) / (t1 - t0));
+    let mix = |a: f32, b: f32| a + (b - a) * k;
+    Rgba { r: mix(a.r, b.r), g: mix(a.g, b.g), b: mix(a.b, b.b), a: mix(a.a, b.a) }.into()
+}
+
+/// Paints `path` in the heat colors by height in `bounds`, faded by `opacity(height)`.
+/// A GPUI gradient has only two colors and spans the path's own bounds, so this paints one
+/// gradient per pair of stops, each clipped to its band, with the colors where the band and
+/// the path meet.
+fn paint_heat(
+    window: &mut Window,
+    path: Path<Pixels>,
+    bounds: Bounds<Pixels>,
+    stops: &[(f32, Hsla)],
+    opacity: impl Fn(f32) -> f32,
+) {
+    let height = bounds.size.height;
+    let y = |t: f32| bounds.bottom() - height * t;
+    let t = |y: Pixels| (bounds.bottom() - y) / height;
+    let color = |t: f32| heat_color(stops, t).opacity(opacity(t));
+    let last = stops.len() - 2;
+    for (i, pair) in stops.windows(2).enumerate() {
+        // The outer bands reach a bit past the graph, so the line isn't cut at 0% and 100%.
+        let top = if i == last { bounds.top() - px(4.) } else { y(pair[1].0) };
+        let bottom = if i == 0 { bounds.bottom() + px(4.) } else { y(pair[0].0) };
+        let band = Bounds::from_corners(point(bounds.left() - px(4.), top), point(bounds.right() + px(4.), bottom));
+        let painted = path.bounds.intersect(&band);
+        if painted.size.height <= px(0.) {
+            continue;
+        }
+        let gradient = linear_gradient(
+            180.,
+            linear_color_stop(color(t(painted.top())), 0.),
+            linear_color_stop(color(t(painted.bottom())), 1.),
+        );
+        window.with_content_mask(Some(ContentMask { bounds: band }), |window| {
+            window.paint_path(path.clone(), gradient);
+        });
+    }
+}
+
 /// A small area chart of `graph`, newest value at the right edge, drawn with GPUI paths.
-fn history_graph(graph: Graph, color: Hsla) -> Canvas<()> {
+/// `Area` draws it in `color`; `Heat` colors it by height with `heat` (see [`heat_stops`]).
+fn history_graph(graph: Graph, graph_style: GraphStyle, color: Hsla, heat: [(f32, Hsla); 4]) -> Canvas<()> {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -439,16 +492,24 @@ fn history_graph(graph: Graph, color: Hsla) -> Canvas<()> {
             area.line_to(point(x(points.len() - 1), bounds.bottom()));
             area.close();
             if let Ok(path) = area.build() {
-                window.paint_path(path, color.opacity(0.25));
+                match graph_style {
+                    GraphStyle::Area => window.paint_path(path, color.opacity(0.25)),
+                    // Stronger up high, fading out toward the bottom.
+                    GraphStyle::Heat => paint_heat(window, path, bounds, &heat, |t| 0.08 + 0.3 * t),
+                }
             }
 
-            let mut line = PathBuilder::stroke(px(1.5));
+            let width = if graph_style == GraphStyle::Heat { 2. } else { 1.5 };
+            let mut line = PathBuilder::stroke(px(width));
             line.move_to(point(x(0), y(points[0])));
             for (i, value) in points.iter().enumerate().skip(1) {
                 line.line_to(point(x(i), y(*value)));
             }
             if let Ok(path) = line.build() {
-                window.paint_path(path, color);
+                match graph_style {
+                    GraphStyle::Area => window.paint_path(path, color),
+                    GraphStyle::Heat => paint_heat(window, path, bounds, &heat, |_| 1.),
+                }
             }
         },
     )
@@ -475,8 +536,8 @@ impl Render for DesktopWidget {
             window.drop_image(old).ok();
         }
         let config = self.config.read(cx);
-        let (parts, thresholds, show_graph, locked) =
-            (config.parts.clone(), config.thresholds, config.show_graph, config.locked);
+        let (parts, thresholds, show_graph, graph_style, locked) =
+            (config.parts.clone(), config.thresholds, config.show_graph, config.graph_style, config.locked);
         let warns_when_low = widget_type(config.kind).warns_when_low();
         let style = self.style(cx).clone();
 
@@ -587,7 +648,8 @@ impl Render for DesktopWidget {
                 .when(rows.is_empty() && parts.show_bar, |text| {
                     text.children(bar.map(|fill| usage_bar(fill, accent, 4.).w(relative(0.8))))
                     .children(graph.map(|graph| {
-                        div().w(relative(0.85)).h(px(style.font_size * 1.1)).child(history_graph(graph, accent).size_full())
+                        let graph = history_graph(graph, graph_style, accent, heat_stops(&style));
+                        div().w(relative(0.85)).h(px(style.font_size * 1.1)).child(graph.size_full())
                     }))
                 })
                 .children(rows.into_iter().map(|row| {

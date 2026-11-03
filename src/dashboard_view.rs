@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::animation::MotionKind;
-use crate::dashboard::{BatteryOptions, Dashboard, DateFormat, WeatherOptions, WidgetConfig, WidgetKind};
+use crate::dashboard::{BatteryOptions, Dashboard, DateFormat, GraphStyle, WeatherOptions, WidgetConfig, WidgetKind};
 use crate::stats::SystemStats;
 use crate::theme::{self, Theme, ThemeLibrary};
 use crate::weather::{self, Place};
@@ -429,6 +429,7 @@ impl DashboardView {
         let kind = config.kind;
         let (enabled, use_shared_style, locked) = (config.enabled, config.use_shared_style, config.locked);
         let (show_temperature, show_graph, disk) = (config.show_temperature, config.show_graph, config.disk.clone());
+        let graph_style = config.graph_style;
         let (parts, thresholds, clock) = (config.parts.clone(), config.thresholds, config.clock);
         let (battery, media, weather) = (config.battery.clone(), config.media, config.weather.clone());
         let panel = &self.widget_panels[index];
@@ -477,6 +478,24 @@ impl DashboardView {
                     |c, v| c.show_graph = v,
                     cx,
                 ))
+            })
+            .when(has_graph && show_graph, |content| {
+                content.child(
+                    div().flex().flex_col().gap_1().child("Graph style").child(
+                        RadioGroup::horizontal("graph-style")
+                            .children(GraphStyle::ALL.map(GraphStyle::name))
+                            .selected_index(GraphStyle::ALL.iter().position(|style| *style == graph_style))
+                            .on_click(cx.listener(move |this, picked: &usize, _, cx| {
+                                this.update_widget(index, cx, |c| c.graph_style = GraphStyle::ALL[*picked]);
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .when(graph_style == GraphStyle::Heat, |content| {
+                    content.child(div().text_sm().opacity(0.7).child(
+                        "The line goes from green to yellow, then to the \"Warning\" and \"Critical\" colors                          in the style as it gets higher.",
+                    ))
+                })
             })
             .when(kind == WidgetKind::Cpu, |content| {
                 content.child(self.checkbox(

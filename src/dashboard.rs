@@ -59,6 +59,28 @@ impl Default for Parts {
     }
 }
 
+/// How the history graph is drawn.
+#[derive(Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum GraphStyle {
+    /// The line and a light fill under it, in the accent color.
+    #[default]
+    Area,
+    /// The line colored by how high it is (green, yellow, then the warning and critical
+    /// colors), over a fill that fades the same way.
+    Heat,
+}
+
+impl GraphStyle {
+    pub const ALL: [GraphStyle; 2] = [GraphStyle::Area, GraphStyle::Heat];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            GraphStyle::Area => "Area",
+            GraphStyle::Heat => "Heat",
+        }
+    }
+}
+
 /// Recolors the value, bar and graph when usage (in %) gets high.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
@@ -172,6 +194,7 @@ pub struct WidgetConfig {
     pub show_temperature: bool,
     /// Widgets that have one (CPU, RAM, network): draw the last minute as a graph instead of a bar.
     pub show_graph: bool,
+    pub graph_style: GraphStyle,
     pub parts: Parts,
     pub thresholds: Thresholds,
     pub clock: ClockOptions,
@@ -227,6 +250,7 @@ struct WidgetFile {
     disk: String,
     show_temperature: bool,
     show_graph: bool,
+    graph_style: GraphStyle,
     parts: Parts,
     thresholds: Thresholds,
     clock: ClockOptions,
@@ -248,6 +272,7 @@ impl Default for WidgetFile {
             disk: "C:\\".into(),
             show_temperature: true,
             show_graph: true,
+            graph_style: GraphStyle::default(),
             parts: Parts::default(),
             thresholds: Thresholds::default(),
             clock: ClockOptions::default(),
@@ -270,6 +295,7 @@ impl WidgetFile {
             disk: self.disk,
             show_temperature: self.show_temperature,
             show_graph: self.show_graph,
+            graph_style: self.graph_style,
             parts: self.parts,
             thresholds: self.thresholds,
             clock: self.clock,
@@ -379,6 +405,7 @@ impl Dashboard {
                         disk: widget.disk.clone(),
                         show_temperature: widget.show_temperature,
                         show_graph: widget.show_graph,
+                        graph_style: widget.graph_style,
                         parts: widget.parts.clone(),
                         thresholds: widget.thresholds,
                         clock: widget.clock,
