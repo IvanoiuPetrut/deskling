@@ -2,6 +2,9 @@
 name = "deskling"
 version = "0.1.0"
 edition = "2024"
+description = "Desktop widgets for Windows: clock, system stats, batteries, now playing and weather"
+license = "MIT"
+repository = "https://github.com/IvanoiuPetrut/deskling"
 
 [dependencies]
 chrono = "0.4.45"
