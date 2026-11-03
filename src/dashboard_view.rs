@@ -429,7 +429,7 @@ impl DashboardView {
         let kind = config.kind;
         let (enabled, use_shared_style, locked) = (config.enabled, config.use_shared_style, config.locked);
         let (show_temperature, show_graph, disk) = (config.show_temperature, config.show_graph, config.disk.clone());
-        let graph_style = config.graph_style;
+        let (graph_style, graph_fade) = (config.graph_style, config.graph_fade);
         let (parts, thresholds, clock) = (config.parts.clone(), config.thresholds, config.clock);
         let (battery, media, weather) = (config.battery.clone(), config.media, config.weather.clone());
         let panel = &self.widget_panels[index];
@@ -493,9 +493,18 @@ impl DashboardView {
                 )
                 .when(graph_style == GraphStyle::Heat, |content| {
                     content.child(div().text_sm().opacity(0.7).child(
-                        "The line goes from green to yellow, then to the \"Warning\" and \"Critical\" colors                          in the style as it gets higher.",
+                        "The line goes from green to yellow, then to the \"Warning\" and \"Critical\" colors \
+                         in the style as it gets higher.",
                     ))
                 })
+                .child(self.checkbox(
+                    "graph-fade",
+                    "Fade out the graph's left and right edges",
+                    graph_fade,
+                    index,
+                    |c, v| c.graph_fade = v,
+                    cx,
+                ))
             })
             .when(kind == WidgetKind::Cpu, |content| {
                 content.child(self.checkbox(

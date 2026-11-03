@@ -28,6 +28,10 @@ const PLAYER_WIDTH: f32 = 12.5;
 /// After a media button press, look again this long after the click (a skip takes the app a
 /// moment) instead of waiting for the next reading.
 const MEDIA_REFRESH: Duration = Duration::from_millis(700);
+/// With the edge fade on: how much of the graph's width fades out at each end, and the width of
+/// the steps it fades in (each step is the graph painted again, clipped, a bit more see-through).
+const GRAPH_FADE: f32 = 0.15;
+const GRAPH_FADE_STEP: f32 = 3.;
 
 // Media button icons. GPUI draws an SVG in one color (the text color), so only the shapes matter.
 const PLAY_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7 4.6v14.8a1 1 0 0 0 1.53.85l11.8-7.4a1 1 0 0 0 0-1.7L8.53 3.75A1 1 0 0 0 7 4.6z"/></svg>"#;
@@ -470,7 +474,8 @@ fn paint_heat(
 
 /// A small area chart of `graph`, newest value at the right edge, drawn with GPUI paths.
 /// `Area` draws it in `color`; `Heat` colors it by height with `heat` (see [`heat_stops`]).
-fn history_graph(graph: Graph, graph_style: GraphStyle, color: Hsla, heat: [(f32, Hsla); 4]) -> Canvas<()> {
+/// With `fade`, it fades out toward the left and right edges.
+fn history_graph(graph: Graph, graph_style: GraphStyle, fade: bool, color: Hsla, heat: [(f32, Hsla); 4]) -> Canvas<()> {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -491,24 +496,49 @@ fn history_graph(graph: Graph, graph_style: GraphStyle, color: Hsla, heat: [(f32
             }
             area.line_to(point(x(points.len() - 1), bounds.bottom()));
             area.close();
-            if let Ok(path) = area.build() {
-                match graph_style {
-                    GraphStyle::Area => window.paint_path(path, color.opacity(0.25)),
-                    // Stronger up high, fading out toward the bottom.
-                    GraphStyle::Heat => paint_heat(window, path, bounds, &heat, |t| 0.08 + 0.3 * t),
-                }
-            }
-
             let width = if graph_style == GraphStyle::Heat { 2. } else { 1.5 };
             let mut line = PathBuilder::stroke(px(width));
             line.move_to(point(x(0), y(points[0])));
             for (i, value) in points.iter().enumerate().skip(1) {
                 line.line_to(point(x(i), y(*value)));
             }
-            if let Ok(path) = line.build() {
-                match graph_style {
-                    GraphStyle::Area => window.paint_path(path, color),
-                    GraphStyle::Heat => paint_heat(window, path, bounds, &heat, |_| 1.),
+            let (Ok(area), Ok(line)) = (area.build(), line.build()) else {
+                return;
+            };
+
+            // Paints the graph `opacity` see-through, within the current content mask.
+            let paint = |window: &mut Window, opacity: f32| match graph_style {
+                GraphStyle::Area => {
+                    window.paint_path(area.clone(), color.opacity(0.25 * opacity));
+                    window.paint_path(line.clone(), color.opacity(opacity));
+                }
+                GraphStyle::Heat => {
+                    // The fill is stronger up high, fading out toward the bottom.
+                    paint_heat(window, area.clone(), bounds, &heat, |t| (0.08 + 0.3 * t) * opacity);
+                    paint_heat(window, line.clone(), bounds, &heat, |_| opacity);
+                }
+            };
+            // A column of the graph from `left` to `right`, a little taller so the line isn't cut.
+            let column = |left: Pixels, right: Pixels| ContentMask {
+                bounds: Bounds::from_corners(point(left, bounds.top() - px(4.)), point(right, bounds.bottom() + px(4.))),
+            };
+
+            let fade_width = if fade { bounds.size.width * GRAPH_FADE } else { px(0.) };
+            let steps = (fade_width / px(GRAPH_FADE_STEP)).ceil() as usize;
+            let step_width = if steps > 0 { fade_width / steps as f32 } else { px(0.) };
+            // The middle at full strength (all of it without the fade), then each end in steps.
+            let (middle_left, middle_right) = match fade {
+                true => (bounds.left() + fade_width, bounds.right() - fade_width),
+                false => (bounds.left() - px(4.), bounds.right() + px(4.)),
+            };
+            window.with_content_mask(Some(column(middle_left, middle_right)), |window| paint(window, 1.));
+            for i in 0..steps {
+                let opacity = (i as f32 + 0.5) / steps as f32;
+                let (inner, outer) = (step_width * i as f32, step_width * (i + 1) as f32);
+                let left = column(bounds.left() + inner, bounds.left() + outer);
+                let right = column(bounds.right() - outer, bounds.right() - inner);
+                for mask in [left, right] {
+                    window.with_content_mask(Some(mask), |window| paint(window, opacity));
                 }
             }
         },
@@ -536,8 +566,9 @@ impl Render for DesktopWidget {
             window.drop_image(old).ok();
         }
         let config = self.config.read(cx);
-        let (parts, thresholds, show_graph, graph_style, locked) =
-            (config.parts.clone(), config.thresholds, config.show_graph, config.graph_style, config.locked);
+        let (parts, thresholds, show_graph, locked) =
+            (config.parts.clone(), config.thresholds, config.show_graph, config.locked);
+        let (graph_style, graph_fade) = (config.graph_style, config.graph_fade);
         let warns_when_low = widget_type(config.kind).warns_when_low();
         let style = self.style(cx).clone();
 
@@ -648,7 +679,7 @@ impl Render for DesktopWidget {
                 .when(rows.is_empty() && parts.show_bar, |text| {
                     text.children(bar.map(|fill| usage_bar(fill, accent, 4.).w(relative(0.8))))
                     .children(graph.map(|graph| {
-                        let graph = history_graph(graph, graph_style, accent, heat_stops(&style));
+                        let graph = history_graph(graph, graph_style, graph_fade, accent, heat_stops(&style));
                         div().w(relative(0.85)).h(px(style.font_size * 1.1)).child(graph.size_full())
                     }))
                 })
