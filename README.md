@@ -8,6 +8,10 @@
   Small, good-looking desktop widgets for Windows, written in Rust with <a href="https://www.gpui.rs/">GPUI</a>.
 </p>
 
+<p align="center">
+  <a href="https://github.com/IvanoiuPetrut/deskling/releases/latest"><b>Download for Windows</b></a>
+</p>
+
 Deskling puts widgets on your desktop (a clock, CPU, RAM, disk space, network, batteries, what's
 playing, the weather), a bit like Rainmeter skins. A dashboard window lets you add, remove and
 style them, and a tray icon keeps the app out of the way.
@@ -35,6 +39,14 @@ style them, and a tray icon keeps the app out of the way.
 - **Now playing** controls for Spotify, browsers and most other players.
 - **Weather** from [Open-Meteo](https://open-meteo.com/): no account or API key needed.
 - **Tray icon** and **Start with Windows**.
+
+## Download
+
+Grab the zip from the [latest release](https://github.com/IvanoiuPetrut/deskling/releases/latest),
+unzip it and run `deskling.exe`. There's no installer, and it needs Windows 10 or 11.
+
+The program isn't code-signed, so Windows SmartScreen warns you the first time ("Windows protected
+your PC"). Click **More info**, then **Run anyway**, or build it yourself as described below.
 
 ## Requirements
 
