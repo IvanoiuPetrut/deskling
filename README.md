@@ -12,6 +12,15 @@ Deskling puts widgets on your desktop (a clock, CPU, RAM, disk space, network, b
 playing, the weather), a bit like Rainmeter skins. A dashboard window lets you add, remove and
 style them, and a tray icon keeps the app out of the way.
 
+<table>
+  <tr>
+    <td align="center"><img src="assets/screenshots/widgets-midnight.webp" alt="Widgets with the Midnight theme"><br><sub>Midnight</sub></td>
+    <td align="center"><img src="assets/screenshots/widgets-frosted-glass.png" alt="Widgets with the Frosted glass theme"><br><sub>Frosted glass</sub></td>
+    <td align="center"><img src="assets/screenshots/widgets-terminal.png" alt="Widgets with the Terminal theme"><br><sub>Terminal</sub></td>
+    <td align="center"><img src="assets/screenshots/widgets-sunset.webp" alt="Widgets with the Sunset theme"><br><sub>Sunset</sub></td>
+  </tr>
+</table>
+
 ## Features
 
 - **Eight widget types**: clock, CPU, RAM, disk space, network, batteries, now playing and weather.
@@ -78,6 +87,17 @@ The window that opens is the dashboard. On the left is the list of widgets, each
 that shows or hides it on the desktop; click a widget to see its options on the right. **Add widget**
 adds a new one (for example two Disk widgets, for C: and D:), and **Remove widget** on its options
 page removes it. **Save** keeps everything for the next start.
+
+<table>
+  <tr>
+    <td align="center"><img src="assets/screenshots/dashboard-cpu.png" alt="The CPU widget's options in the dashboard"><br><sub>A widget's options</sub></td>
+    <td align="center"><img src="assets/screenshots/dashboard-shared-style.png" alt="The shared style editor"><br><sub>Shared style</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/dashboard-themes.png" alt="The Themes page with previews of every theme"><br><sub>Themes</sub></td>
+    <td align="center"><img src="assets/screenshots/dashboard-animations.png" alt="The Animations page with an easing curve editor"><br><sub>Animations</sub></td>
+  </tr>
+</table>
 
 | Widget | Shows | Options |
 |---|---|---|
